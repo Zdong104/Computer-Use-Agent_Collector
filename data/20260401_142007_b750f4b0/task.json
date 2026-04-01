@@ -1,0 +1,120 @@
+{
+  "task_id": "20260401_142007_b750f4b0",
+  "description": "HI\nHere is Demo \nNew",
+  "start_time": "2026-04-01T18:20:07.309053+00:00",
+  "end_time": "2026-04-01T18:20:45.584925+00:00",
+  "os_name": "linux",
+  "session_type": "wayland-gnome",
+  "screen_resolution": [
+    3840,
+    2400
+  ],
+  "actions": [
+    {
+      "id": "d3a4e275e6894c58be698a0a8a07b578",
+      "task_id": "20260401_142007_b750f4b0",
+      "task_description": "HI\nHere is Demo \nNew",
+      "sequence_number": 1,
+      "timestamp_before": "2026-04-01T18:20:10.624066+00:00",
+      "timestamp_action": "2026-04-01T18:20:12.456778+00:00",
+      "timestamp_after": "2026-04-01T18:20:14.804163+00:00",
+      "elapsed_since_task_start": 7.494538957000032,
+      "pre_screenshot": "action_0001_before.png",
+      "post_screenshot": "action_0001_after.png",
+      "action_type": "click",
+      "action_coords": [
+        3810,
+        103
+      ],
+      "action_details": {
+        "button": "right"
+      },
+      "os_name": "linux",
+      "session_type": "wayland-gnome",
+      "screen_resolution": [
+        3840,
+        2400
+      ]
+    },
+    {
+      "id": "dc0053a5508d44ca9467403740f0feed",
+      "task_id": "20260401_142007_b750f4b0",
+      "task_description": "HI\nHere is Demo \nNew",
+      "sequence_number": 2,
+      "timestamp_before": "2026-04-01T18:20:19.757252+00:00",
+      "timestamp_action": "2026-04-01T18:20:20.256845+00:00",
+      "timestamp_after": "2026-04-01T18:20:23.082592+00:00",
+      "elapsed_since_task_start": 15.772958148000043,
+      "pre_screenshot": "action_0002_before.png",
+      "post_screenshot": "action_0002_after.png",
+      "action_type": "click",
+      "action_coords": [
+        3810,
+        103
+      ],
+      "action_details": {
+        "button": "left"
+      },
+      "os_name": "linux",
+      "session_type": "wayland-gnome",
+      "screen_resolution": [
+        3840,
+        2400
+      ]
+    },
+    {
+      "id": "15b58571db2b4d4cb7acebcff11786ca",
+      "task_id": "20260401_142007_b750f4b0",
+      "task_description": "HI\nHere is Demo \nNew",
+      "sequence_number": 3,
+      "timestamp_before": "2026-04-01T18:20:26.670146+00:00",
+      "timestamp_action": "2026-04-01T18:20:28.835246+00:00",
+      "timestamp_after": "2026-04-01T18:20:32.767222+00:00",
+      "elapsed_since_task_start": 25.457602025000142,
+      "pre_screenshot": "action_0003_before.png",
+      "post_screenshot": "action_0003_after.png",
+      "action_type": "scroll",
+      "action_coords": [
+        3810,
+        103
+      ],
+      "action_details": {
+        "dx_total": 0,
+        "dy_total": -2299,
+        "direction": "down"
+      },
+      "os_name": "linux",
+      "session_type": "wayland-gnome",
+      "screen_resolution": [
+        3840,
+        2400
+      ]
+    },
+    {
+      "id": "24a3d3f053274a4d9aea8debbc5ed787",
+      "task_id": "20260401_142007_b750f4b0",
+      "task_description": "HI\nHere is Demo \nNew",
+      "sequence_number": 4,
+      "timestamp_before": "2026-04-01T18:20:39.118439+00:00",
+      "timestamp_action": "2026-04-01T18:20:40.803115+00:00",
+      "timestamp_after": "2026-04-01T18:20:43.924376+00:00",
+      "elapsed_since_task_start": 36.61474292699995,
+      "pre_screenshot": "action_0004_before.png",
+      "post_screenshot": "action_0004_after.png",
+      "action_type": "click",
+      "action_coords": [
+        3810,
+        103
+      ],
+      "action_details": {
+        "button": "middle"
+      },
+      "os_name": "linux",
+      "session_type": "wayland-gnome",
+      "screen_resolution": [
+        3840,
+        2400
+      ]
+    }
+  ]
+}
