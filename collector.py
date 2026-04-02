@@ -91,9 +91,19 @@ class DataStore:
             json.dump(asdict(task), f, indent=2, default=str)
 
     def save_master_index(self, tasks: List[TaskRecord]):
+        index_path = self.base_dir / 'index.json'
         records = []
+        if index_path.exists():
+            try:
+                with open(index_path, 'r') as f:
+                    records = json.load(f)
+            except Exception:
+                pass
+
+        existing_ids = {r['task_id']: i for i, r in enumerate(records)}
+
         for t in tasks:
-            records.append({
+            rec = {
                 'task_id': t.task_id,
                 'description': t.description,
                 'start_time': t.start_time,
@@ -101,8 +111,13 @@ class DataStore:
                 'num_actions': len(t.actions),
                 'os': t.os_name,
                 'session_type': t.session_type,
-            })
-        with open(self.base_dir / 'index.json', 'w') as f:
+            }
+            if t.task_id in existing_ids:
+                records[existing_ids[t.task_id]] = rec
+            else:
+                records.append(rec)
+
+        with open(index_path, 'w') as f:
             json.dump(records, f, indent=2)
 
 
