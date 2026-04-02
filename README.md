@@ -86,6 +86,17 @@ data/
       action_0001_after.png
 ```
 
+## Citation
+
+```bibtex
+@misc{dong2026cuacollector,
+  author = {Zihan Dong},
+  title = {CUA_Collector},
+  year = {2026},
+  note = {Computer Use Agent behavior collection demo}
+}
+```
+
 ## License
 
 Commercial Use: let's discuss by puma122707@gmail.com.

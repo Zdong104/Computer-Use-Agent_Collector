@@ -2,7 +2,7 @@ from PIL import Image, ImageDraw
 from pathlib import Path
 import json
 
-base = Path('/home/zihan/Downloads/CUA_BehaviorClone/data/20260401_235826_489b5eb3')
+base = Path('/home/zihan/Downloads/CUA_BehaviorClone/data/20260402_092539_7b8d34d5')
 meta = json.loads((base / 'task.json').read_text())
 
 action = meta['actions'][0]

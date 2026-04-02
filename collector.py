@@ -12,6 +12,7 @@ Workflow:
 Records: timestamps, screenshots, action type/coords, OS info, and more.
 """
 import os
+from PIL import Image as PILImage
 import sys
 import json
 import time
@@ -398,9 +399,7 @@ class Collector:
 
         self.overlay.update_state('TASK_ACTIVE', desc[:30])
         print(f'✅ Task "{desc}" started  (id: {tid})')
-
-        # Auto-take the first pre-screenshot immediately
-        self._on_screenshot()
+        print("   Press Ctrl+F9 to take the first pre-screenshot.")
 
     def _on_screenshot(self):
         with self._lock:
@@ -427,6 +426,21 @@ class Collector:
                 self.seq -= 1
             self.overlay.update_state('TASK_ACTIVE')
             return
+
+        # Dynamically read resolution from the actual captured screenshot
+        # This ensures it matches the PipeWire-captured monitor, not the
+        # monitor where the terminal is placed.
+        try:
+            img = PILImage.open(path)
+            actual_res = img.size  # (width, height)
+            img.close()
+            if actual_res != self.resolution:
+                print(f"   📐 Screen resolution updated: {self.resolution} → {actual_res}")
+                self.resolution = actual_res
+                if self.current_task:
+                    self.current_task.screen_resolution = actual_res
+        except Exception as e:
+            print(f"   ⚠️  Could not read screenshot dimensions: {e}")
 
         with self._lock:
             self._pre_ss_name = name + '.png'
