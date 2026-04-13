@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-V2 Stress Test — Validates the C++ capture engine under synthetic load.
+Stress Test — Validates the C++ capture engine under synthetic load.
 
 Tests:
   1. Ring buffer + action engine with 200 synthetic actions at 0.5s intervals
@@ -23,7 +23,7 @@ try:
     import cua_capture
 except ImportError:
     print("❌ cua_capture module not found!")
-    print("   Build it first: cd V2/build && cmake .. && make -j$(nproc)")
+    print("   Build it first: cmake -S . -B build && cmake --build build -j$(nproc)")
     sys.exit(1)
 
 
@@ -33,7 +33,7 @@ def test_synthetic_stress():
     No PipeWire or evdev needed — uses inject_frame() and inject_mouse_click().
     """
     print("=" * 60)
-    print("  V2 Stress Test — 200 Actions @ 0.5s Interval")
+    print("  Stress Test — 200 Actions @ 0.5s Interval")
     print("  Resolution: 3840 × 2400")
     print("=" * 60)
 

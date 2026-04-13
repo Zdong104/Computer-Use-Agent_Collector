@@ -1,18 +1,35 @@
 """
-CUA_Collector - UI Action Data Collector
-========================================
-Collects (State_A, Action, State_B) data for UI agent training.
+CUA Collector — Automated UI Action Data Collector
+==================================================
+Fully automated collector using the C++ capture engine (`cua_capture`).
+
+Instead of manual Ctrl+F9 for each action, the collector continuously captures
+screenshots into a ring buffer and automatically records grouped mouse/keyboard
+actions with their pre/post screenshots.
 
 Workflow:
   Ctrl+F8  → Start new task (popup for description)
-  Ctrl+F9  → Take pre-screenshot, then listen for mouse action
-  [mouse click/scroll] → debounce 0.5s → auto post-screenshot
+  [actions are captured automatically while task is active]
   Ctrl+F12 → End current task
+  Ctrl+C   → Quit
 
-Records: timestamps, screenshots, action type/coords, OS info, and more.
+Architecture:
+  C++ Engine (cua_capture.so):
+    - Capture thread: 10 FPS PipeWire screenshots → ring buffer
+    - Input thread: libevdev mouse/keyboard events
+    - Action worker: correlates events with pre/post frames
+  Python Layer (this file):
+    - Task management (start/end, descriptions)
+    - Data persistence (PNG screenshots, JSON metadata)
+    - Status overlay UI
+
+Requirements:
+  Build the C++ module first:
+    cmake -S . -B build
+    cmake --build build -j$(nproc)
 """
+
 import os
-from PIL import Image as PILImage
 import sys
 import json
 import time
@@ -22,17 +39,38 @@ from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Tuple, List
+from concurrent.futures import ThreadPoolExecutor
+from PIL import Image as PILImage
+import io
 
-from platform_backends import (
-    OS_NAME, SESSION_TYPE,
-    detect_platform, get_screen_resolution,
-    Screenshotter, CursorTracker,
-    WaylandInputMonitor, PynputInputMonitor,
-)
+# Add build dir to path for cua_capture module
+build_dir = Path(__file__).parent / 'build'
+if build_dir.exists():
+    sys.path.insert(0, str(build_dir))
+
+try:
+    import cua_capture
+except ImportError as e:
+    err = str(e)
+    if 'GLIBCXX' in err or 'libstdc++' in err:
+        print("❌ libstdc++ version mismatch (miniconda vs system GCC)!")
+        print(f"   Error: {err}")
+        print()
+        print("   Fix: Use the launcher script instead:")
+        print("     ./run.sh")
+        print()
+        print("   Or run directly with:")
+        print("     LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 python collector.py")
+    elif 'No module named' in err or 'No such file' in err:
+        print("❌ cua_capture module not found!")
+        print("   Build it first: cmake -S . -B build && cmake --build build -j$(nproc)")
+    else:
+        print(f"❌ Failed to import cua_capture: {e}")
+    sys.exit(1)
 
 
 # ============================================================
-# Data Models
+# Data Models (compatible with V1)
 # ============================================================
 
 @dataclass
@@ -47,12 +85,13 @@ class ActionRecord:
     elapsed_since_task_start: float
     pre_screenshot: str
     post_screenshot: str
-    action_type: str          # "click" or "scroll"
+    action_type: str
     action_coords: Tuple[int, int]
-    action_details: dict      # button info or scroll delta
+    action_details: dict
     os_name: str
     session_type: str
     screen_resolution: Tuple[int, int]
+    pre_degraded: bool = False
 
 
 @dataclass
@@ -68,7 +107,7 @@ class TaskRecord:
 
 
 # ============================================================
-# Data Store
+# Data Store (same as V1)
 # ============================================================
 
 class DataStore:
@@ -122,7 +161,7 @@ class DataStore:
 
 
 # ============================================================
-# Status Overlay (Tkinter)
+# Status Overlay (Tkinter) — reused from V1
 # ============================================================
 
 class StatusOverlay:
@@ -131,14 +170,14 @@ class StatusOverlay:
     COLORS = {
         'IDLE': '#555555',
         'TASK_ACTIVE': '#1565C0',
-        'WAITING_ACTION': '#E65100',
-        'WAITING_TIMEOUT': '#B71C1C',
+        'CAPTURING': '#2E7D32',
+        'SAVING': '#E65100',
     }
     LABELS = {
         'IDLE': '⏹  Idle',
         'TASK_ACTIVE': '🟢 Task Active',
-        'WAITING_ACTION': '🟡 Waiting for Action',
-        'WAITING_TIMEOUT': '🔴 Recording…',
+        'CAPTURING': '🔄 Auto-Capturing',
+        'SAVING': '💾 Saving…',
     }
 
     def __init__(self):
@@ -148,6 +187,7 @@ class StatusOverlay:
         self._running = False
         self._pending_state = 'IDLE'
         self._pending_text = None
+        self._dialog = None
 
     def start(self):
         self._running = True
@@ -163,7 +203,7 @@ class StatusOverlay:
         self._root.overrideredirect(True)
 
         sw = self._root.winfo_screenwidth()
-        self._root.geometry(f'250x36+{sw - 270}+10')
+        self._root.geometry(f'300x36+{sw - 320}+10')
         self._root.configure(bg='#222')
 
         self._label = tk.Label(
@@ -209,29 +249,30 @@ class StatusOverlay:
         self._running = False
 
     def ask_description(self) -> Optional[str]:
-        """Blocking popup to get task description from user.
-        Shift+Enter inserts a newline. Plain Enter submits.
-        Uses the overlay's existing Tk root to avoid duplicate windows."""
         self._dialog_result = None
         self._dialog_done = threading.Event()
 
-        # Schedule dialog creation on the overlay's Tk event loop
         if self._root:
             self._root.after(0, self._create_dialog)
 
-        # Block calling thread until dialog is dismissed
         while not self._dialog_done.is_set():
             time.sleep(0.1)
 
         return self._dialog_result
 
     def _create_dialog(self):
-        """Create the task description dialog as a Toplevel of the overlay root."""
         import tkinter as tk
 
+        if self._dialog is not None and self._dialog.winfo_exists():
+            self._dialog.lift()
+            self._dialog.focus_force()
+            return
+
         dialog = tk.Toplevel(self._root)
+        self._dialog = dialog
         dialog.title("New Task")
         dialog.attributes('-topmost', True)
+        dialog.transient(self._root)
 
         w, h = 600, 260
         sw = dialog.winfo_screenwidth()
@@ -244,23 +285,44 @@ class StatusOverlay:
 
         text = tk.Text(dialog, font=("Helvetica", 18), height=3, wrap='word')
         text.pack(pady=10, padx=40, fill='x')
-        text.focus_set()
+
+        def close_dialog():
+            if not dialog.winfo_exists():
+                return
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            self._dialog = None
+            dialog.destroy()
 
         def submit(e=None):
             content = text.get('1.0', 'end-1c').strip()
             self._dialog_result = content if content else None
-            dialog.destroy()
+            close_dialog()
             self._dialog_done.set()
             return 'break'
 
         def cancel(e=None):
             self._dialog_result = None
-            dialog.destroy()
+            close_dialog()
             self._dialog_done.set()
+            return 'break'
 
-        text.bind('<Return>', submit)
-        text.bind('<Shift-Return>', lambda e: None)  # allow default newline
+        def handle_text_return(e=None):
+            # Match the V1 intent explicitly: Enter submits, Shift+Enter inserts
+            # a newline in the description box.
+            if e is not None and (e.state & 0x1):
+                text.insert('insert', '\n')
+                return 'break'
+            return submit()
+
+        text.bind('<Return>', handle_text_return)
+        text.bind('<KP_Enter>', handle_text_return)
+        text.bind('<Shift-Return>', handle_text_return)
+        text.bind('<Shift-KP_Enter>', handle_text_return)
         text.bind('<Escape>', cancel)
+        dialog.bind('<Escape>', cancel)
 
         bf = tk.Frame(dialog)
         bf.pack(pady=10)
@@ -268,88 +330,115 @@ class StatusOverlay:
         tk.Button(bf, text="Cancel", command=cancel, font=("Helvetica", 14), width=10).pack(side='left', padx=10)
 
         dialog.protocol("WM_DELETE_WINDOW", cancel)
-        dialog.grab_set()  # make modal
+        dialog.grab_set()
+        dialog.lift()
+        dialog.focus_force()
+        dialog.after(0, lambda: (dialog.lift(), text.focus_force(), text.mark_set('insert', 'end')))
 
 
 # ============================================================
-# Main Collector (State Machine)
+# Platform Detection
 # ============================================================
 
-class Collector:
+import platform as plat
+
+def detect_platform():
+    system = plat.system().lower()
+    if system == 'linux':
+        session_type = os.environ.get('XDG_SESSION_TYPE', '').lower()
+        desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+        if session_type == 'wayland':
+            if 'gnome' in desktop:
+                return 'linux', 'wayland-gnome'
+            return 'linux', 'wayland'
+        return 'linux', 'x11'
+    return system, 'unknown'
+
+OS_NAME, SESSION_TYPE = detect_platform()
+
+
+# ============================================================
+# V2 Collector
+# ============================================================
+
+class CollectorV2:
     """
+    Automated collector using the C++ capture engine.
+
     States:
-      IDLE            – no task active
-      TASK_ACTIVE     – task running, waiting for Ctrl+F9
-      WAITING_ACTION  – pre-screenshot taken, listening for click/scroll
-      WAITING_TIMEOUT – action detected, 0.5s debounce running
+      IDLE        – no task active
+      CAPTURING   – task running, auto-capturing actions
     """
+    START_CAPTURE_SETTLE_SEC = 0.35
 
-    DEBOUNCE_SEC = 0.5
-
-    def __init__(self, data_dir: str = './data'):
+    def __init__(self, data_dir: str = './data',
+                 buffer_capacity: int = 10,
+                 max_width: int = 3840,
+                 max_height: int = 2400,
+                 target_fps: int = 10):
         self.state = 'IDLE'
         self.data_store = DataStore(data_dir)
-        self.screenshotter = Screenshotter()
-        self.cursor = CursorTracker()
         self.overlay = StatusOverlay()
-        self.resolution = get_screen_resolution()
 
-        # If the CUA extension reports native pixel resolution, prefer that
-        # (it matches the PipeWire screenshot dimensions exactly)
-        native_res = self.cursor.get_monitor_native_resolution()
-        if native_res:
-            self.resolution = native_res
+        # Resolution (will be updated from actual frames)
+        self.resolution = (max_width, max_height)
+
+        # C++ capture engine
+        self.engine = cua_capture.CaptureEngine(
+            buffer_capacity=buffer_capacity,
+            max_width=max_width,
+            max_height=max_height,
+            target_fps=target_fps,
+        )
 
         # Task state
         self.current_task: Optional[TaskRecord] = None
         self.seq = 0
         self.task_start_mono = 0.0
+        self._epoch_minus_monotonic = (
+            time.time_ns() / 1_000_000_000 - time.monotonic_ns() / 1_000_000_000
+        )
 
-        # Action capture state
-        self._timer: Optional[threading.Timer] = None
-        self._pre_ss_name: Optional[str] = None
-        self._pre_ss_time: Optional[str] = None
-        self._action_time: Optional[str] = None
-        
-        self._active_keys = {}
-        self._active_mouse_buttons = {}
-        self._completed_key_actions = []
-        self._completed_mouse_actions = []
-        self._scroll_acc = {'dx': 0, 'dy': 0}
-
+        # Thread pool for async disk I/O
+        self._io_pool = ThreadPoolExecutor(max_workers=4)
         self._lock = threading.Lock()
         self._all_tasks: List[TaskRecord] = []
 
-        # Input monitor
-        cbs = {
-            'on_hotkey_start_task': self._on_start_task,
-            'on_hotkey_screenshot': self._on_screenshot,
-            'on_hotkey_end_task': self._on_end_task,
-            'on_hotkey_drop_action': self._on_drop_action,
-            'on_mouse_button': self._on_mouse_button,
-            'on_key_event': self._on_key_event,
-            'on_mouse_scroll': self._on_scroll,
-        }
-        if SESSION_TYPE.startswith('wayland'):
-            self.input = WaylandInputMonitor(cbs)
-        else:
-            self.input = PynputInputMonitor(cbs)
+    def _mono_to_unix_ts(self, mono_ts: float) -> float:
+        if mono_ts <= 0:
+            return 0.0
+        return mono_ts + self._epoch_minus_monotonic
 
-    # ---- public ----
+    def _mono_to_iso(self, mono_ts: float) -> str:
+        if mono_ts <= 0:
+            return 'N/A'
+        return datetime.fromtimestamp(
+            self._mono_to_unix_ts(mono_ts), tz=timezone.utc
+        ).isoformat()
+
+    @staticmethod
+    def _duration_ms(start_ts: float, end_ts: float) -> float:
+        if start_ts <= 0 or end_ts <= 0 or end_ts < start_ts:
+            return 0.0
+        return round((end_ts - start_ts) * 1000.0, 3)
 
     def run(self):
         hdr = (
             f"\n{'='*60}\n"
-            f"  CUA_Collector – UI Action Data Collector\n"
+            f"  CUA_Collector V2 – Automated UI Action Data Collector\n"
             f"{'='*60}\n"
             f"  OS: {OS_NAME}  |  Session: {SESSION_TYPE}\n"
-            f"  Resolution: {self.resolution[0]}×{self.resolution[1]}\n"
+            f"  Max Resolution: {self.resolution[0]}×{self.resolution[1]}\n"
             f"  Data dir: {self.data_store.base_dir.resolve()}\n\n"
             f"  Hotkeys:\n"
             f"    Ctrl+F8   → Start new task\n"
-            f"    Ctrl+F9   → Pre-screenshot (begin action capture)\n"
             f"    Ctrl+F12  → End current task\n"
             f"    Ctrl+C    → Quit\n"
+            f"\n"
+            f"  V2 Features:\n"
+            f"    • Continuous 10 FPS ring buffer capture\n"
+            f"    • Automatic pre/post screenshot matching\n"
+            f"    • No manual Ctrl+F9 needed!\n"
             f"{'='*60}\n"
         )
         print(hdr)
@@ -357,37 +446,66 @@ class Collector:
         self.overlay.start()
         self.overlay.update_state('IDLE')
 
-        # Initialize Wayland screenshot backend (shows share dialog)
-        self.screenshotter.init_wayland()
+        # Initialize PipeWire portal (may show share dialog)
+        print("  🖥️  Initializing PipeWire screen capture...")
+        if not self.engine.init_portal():
+            print("  ❌ Failed to initialize screen capture!")
+            print("  Make sure you're on Wayland/GNOME and approved the share dialog.")
+            return
 
-        self.input.start()
-
-        print("✅ Collector running. Press Ctrl+F8 to start a task.\n")
+        # Start capture + input monitoring
+        self.engine.start()
+        print("✅ Capture engine running. Press Ctrl+F8 to start a task.\n")
 
         try:
             while True:
-                time.sleep(0.5)
+                self._poll_loop()
+                time.sleep(0.05)  # 20 Hz poll
         except KeyboardInterrupt:
             print("\n🛑 Shutting down…")
             self._cleanup()
 
-    def _cleanup(self):
-        if self.current_task:
-            self._finalize_task()
-        self.input.stop()
-        self.screenshotter.stop()
-        self.overlay.stop()
-        self.data_store.save_master_index(self._all_tasks)
-        print("👋 Done.")
-        os._exit(0)
+    def _poll_loop(self):
+        """Main poll: check hotkeys and completed actions."""
 
-    # ---- hotkey handlers ----
+        # 1. Check hotkeys
+        hotkey = self.engine.pop_hotkey()
+        if hotkey is not None:
+            if hotkey == cua_capture.HotkeyType.START_TASK:
+                self._on_start_task()
+            elif hotkey == cua_capture.HotkeyType.END_TASK:
+                self._on_end_task()
+            # SCREENSHOT and DROP_ACTION are V1 compat, ignored in V2
+
+        # 2. Check completed actions
+        while True:
+            action = self.engine.pop_action()
+            if action is None:
+                break
+            
+            if self.state == 'CAPTURING':
+                # Only record actions that strictly happened after the task started
+                # action.event_ts and task_start_mono both use time.monotonic() clock
+                if action.event_ts >= self.task_start_mono:
+                    self._handle_completed_action(action)
+
+            # Update overlay with stats
+            pending = self.engine.pending_count
+            completed = self.engine.completed_count
+            frames = self.engine.total_frames
+            if frames > 0:
+                self.overlay.update_state(
+                    'CAPTURING',
+                    f'#{self.seq} | ⏳{pending} | 📷{frames}'
+                )
 
     def _on_start_task(self):
         with self._lock:
             if self.state != 'IDLE':
                 print("⚠️  Task already active. End it first (Ctrl+F12).")
                 return
+            # Prevent duplicate Ctrl+F8 handling while the description dialog is open.
+            self.state = 'TASK_ACTIVE'
 
         print("\n📋 Starting new task…")
         self.overlay.update_state('TASK_ACTIVE', 'Enter description…')
@@ -395,6 +513,8 @@ class Collector:
         desc = self.overlay.ask_description()
         if not desc:
             print("❌ Cancelled.")
+            with self._lock:
+                self.state = 'IDLE'
             self.overlay.update_state('IDLE')
             return
 
@@ -409,78 +529,21 @@ class Collector:
             )
             self.data_store.create_task_dir(tid)
             self.seq = 0
-            self.task_start_mono = time.monotonic()
-            self.state = 'TASK_ACTIVE'
+            
+            # Drain any stale actions accumulated during IDLE state
+            while self.engine.pop_action() is not None:
+                pass
+            while self.engine.pop_hotkey() is not None:
+                pass
+            
+            # Match V1 semantics more closely: do not record the Ctrl+F8
+            # sequence or popup submit/cancel keystrokes as the first action.
+            self.task_start_mono = time.monotonic() + self.START_CAPTURE_SETTLE_SEC
+            self.state = 'CAPTURING'
 
-        self.overlay.update_state('TASK_ACTIVE', desc[:30])
+        self.overlay.update_state('CAPTURING', desc[:30])
         print(f'✅ Task "{desc}" started  (id: {tid})')
-        print("   Press Ctrl+F9 to take the first pre-screenshot.")
-
-    def _on_screenshot(self):
-        with self._lock:
-            if self.state == 'IDLE':
-                print("⚠️  No active task. Press Ctrl+F8 first.")
-                return
-            if self.state in ('WAITING_ACTION', 'WAITING_TIMEOUT'):
-                print("⚠️  Finish current action first.")
-                return
-            self.seq += 1
-            seq = self.seq
-            tid = self.current_task.task_id
-
-        name = f"action_{seq:04d}_before"
-        path = self.data_store.screenshot_path(tid, name)
-
-        print(f"📸 Pre-screenshot #{seq}…")
-        self.overlay.update_state('WAITING_ACTION', f'#{seq}')
-
-        ok = self.screenshotter.capture(path)
-        if not ok:
-            print("❌ Screenshot failed!")
-            with self._lock:
-                self.seq -= 1
-            self.overlay.update_state('TASK_ACTIVE')
-            return
-
-        # Dynamically read resolution from the actual captured screenshot
-        # This ensures it matches the PipeWire-captured monitor, not the
-        # monitor where the terminal is placed.
-        try:
-            img = PILImage.open(path)
-            actual_res = img.size  # (width, height)
-            img.close()
-            if actual_res != self.resolution:
-                print(f"   📐 Screen resolution updated: {self.resolution} → {actual_res}")
-                self.resolution = actual_res
-                if self.current_task:
-                    self.current_task.screen_resolution = actual_res
-        except Exception as e:
-            print(f"   ⚠️  Could not read screenshot dimensions: {e}")
-
-        with self._lock:
-            self._pre_ss_name = name + '.png'
-            self._pre_ss_time = datetime.now(timezone.utc).isoformat()
-            self._action_time = None
-            self._scroll_acc = {'dx': 0, 'dy': 0}
-            self._completed_key_actions = []
-            self._completed_mouse_actions = []
-            self.state = 'WAITING_ACTION'
-
-        print("   ✅ Saved. Now click, drag, or press special keys… (ESC to cancel)")
-
-    def _on_drop_action(self):
-        """ESC pressed: drop the current action capture and return to TASK_ACTIVE."""
-        with self._lock:
-            if self.state not in ('WAITING_ACTION', 'WAITING_TIMEOUT'):
-                return
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
-            self.seq -= 1  # rollback sequence number
-            self.state = 'TASK_ACTIVE'
-
-        self.overlay.update_state('TASK_ACTIVE', 'Action dropped')
-        print("   ⏪ Action dropped. Press Ctrl+F9 for next, or Ctrl+F12 to end.\n")
+        print("   Actions are being captured automatically!")
 
     def _on_end_task(self):
         with self._lock:
@@ -491,9 +554,6 @@ class Collector:
 
     def _finalize_task(self):
         with self._lock:
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
             if self.current_task:
                 self.current_task.end_time = datetime.now(timezone.utc).isoformat()
                 self.data_store.save_task(self.current_task)
@@ -509,153 +569,161 @@ class Collector:
         self.overlay.update_state('IDLE')
         print(f'\n🏁 Task "{desc}" ended. {n} actions recorded.\n')
 
-    # ---- mouse/key handlers ----
-
-    def _on_key_event(self, key_name: str, pressed: bool):
-        now = datetime.now(timezone.utc)
+    def _handle_completed_action(self, action):
+        """Process a completed action from the C++ engine."""
         with self._lock:
-            if pressed:
-                if key_name not in self._active_keys:
-                    self._active_keys[key_name] = now
-            else:
-                if key_name in self._active_keys:
-                    press_time = self._active_keys.pop(key_name)
-                    if self.state in ('WAITING_ACTION', 'WAITING_TIMEOUT'):
-                        delta_time = (now - press_time).total_seconds()
-                        self._completed_key_actions.append({
-                            'key': key_name,
-                            'press_time': press_time.isoformat(),
-                            'release_time': now.isoformat(),
-                            'delta_time': delta_time
-                        })
-                        if not self._action_time:
-                            self._action_time = press_time.isoformat()
-
-            if self.state in ('WAITING_ACTION', 'WAITING_TIMEOUT'):
-                self._reset_timer_if_idle()
-
-    def _on_mouse_button(self, button: str, pressed: bool):
-        now = datetime.now(timezone.utc)
-        coords = self.cursor.get_position()
-        with self._lock:
-            if pressed:
-                if button not in self._active_mouse_buttons:
-                    self._active_mouse_buttons[button] = {'coords': coords, 'time': now}
-            else:
-                if button in self._active_mouse_buttons:
-                    down_info = self._active_mouse_buttons.pop(button)
-                    if self.state in ('WAITING_ACTION', 'WAITING_TIMEOUT'):
-                        press_time = down_info['time']
-                        delta_time = (now - press_time).total_seconds()
-                        self._completed_mouse_actions.append({
-                            'button': button,
-                            'press_coords': down_info['coords'],
-                            'release_coords': coords,
-                            'press_time': press_time.isoformat(),
-                            'release_time': now.isoformat(),
-                            'delta_time': delta_time
-                        })
-                        if not self._action_time:
-                            self._action_time = press_time.isoformat()
-            
-            if self.state in ('WAITING_ACTION', 'WAITING_TIMEOUT'):
-                self._reset_timer_if_idle()
-
-    def _on_scroll(self, dx: int, dy: int):
-        with self._lock:
-            if self.state not in ('WAITING_ACTION', 'WAITING_TIMEOUT'):
+            if not self.current_task:
                 return
-            self._scroll_acc['dx'] += dx
-            self._scroll_acc['dy'] += dy
-            if not self._action_time:
-                self._action_time = datetime.now(timezone.utc).isoformat()
-            self._reset_timer_if_idle()
-
-    # ---- debounce ----
-
-    def _reset_timer_if_idle(self):
-        if self._timer:
-            self._timer.cancel()
-            self._timer = None
-
-        if self._active_mouse_buttons or self._active_keys:
-            self.state = 'WAITING_TIMEOUT'
-            self.overlay.update_state('WAITING_TIMEOUT', 'Holding…')
-            return
-
-        self.state = 'WAITING_TIMEOUT'
-        self.overlay.update_state('WAITING_TIMEOUT', '⏳ 0.5s')
-        self._timer = threading.Timer(self.DEBOUNCE_SEC, self._on_timer_done)
-        self._timer.start()
-
-    def _on_timer_done(self):
-        """0.5s elapsed with no new events → take post-screenshot."""
-        with self._lock:
-            if self.state != 'WAITING_TIMEOUT':
-                return
+            self.seq += 1
             seq = self.seq
             tid = self.current_task.task_id
 
-            action_type = "unknown"
-            action_coords = self.cursor.get_position()
-            
-            if self._completed_mouse_actions:
-                act = self._completed_mouse_actions[0]
-                dx = abs(act['release_coords'][0] - act['press_coords'][0])
-                dy = abs(act['release_coords'][1] - act['press_coords'][1])
-                if dx > 3 or dy > 3 or act['delta_time'] > 0.3:
-                    action_type = "drag"
-                else:
-                    action_type = "click"
-                action_coords = act['press_coords']
-            elif self._scroll_acc['dx'] != 0 or self._scroll_acc['dy'] != 0:
-                action_type = "scroll"
-            elif self._completed_key_actions:
-                action_type = "hotkey"
+        # Save screenshots async
+        pre_name = f"action_{seq:04d}_before.png"
+        post_name = f"action_{seq:04d}_after.png"
+        pre_path = self.data_store.screenshot_path(tid, f"action_{seq:04d}_before")
+        post_path = self.data_store.screenshot_path(tid, f"action_{seq:04d}_after")
 
-            action_details = {
-                'mouse': self._completed_mouse_actions,
-                'keys': self._completed_key_actions,
-                'scroll': {
-                    'dx_total': self._scroll_acc['dx'],
-                    'dy_total': self._scroll_acc['dy'],
-                    'direction': 'down' if self._scroll_acc['dy'] < 0 else 'up' if self._scroll_acc['dy'] > 0 else 'horizontal' if self._scroll_acc['dx'] != 0 else 'none'
-                }
-            }
+        # Convert RGB bytes to PNG in thread pool
+        if action.pre_frame_rgb and action.pre_w > 0:
+            self._io_pool.submit(
+                self._save_rgb_as_png,
+                action.pre_frame_rgb, action.pre_w, action.pre_h, pre_path
+            )
+            # Update resolution from actual frame size
+            self.resolution = (action.pre_w, action.pre_h)
 
-        name = f"action_{seq:04d}_after"
-        path = self.data_store.screenshot_path(tid, name)
+        if action.post_frame_rgb and action.post_w > 0:
+            self._io_pool.submit(
+                self._save_rgb_as_png,
+                action.post_frame_rgb, action.post_w, action.post_h, post_path
+            )
 
-        print(f"   📸 Post-screenshot #{seq}…")
-        ok = self.screenshotter.capture(path)
+        # V1 compatibility: Keys are a list of dicts.
+        keys_list = []
+        if hasattr(action, 'key_actions') and action.key_actions:
+            for key_action in action.key_actions:
+                keys_list.append({
+                    'key': key_action.key_name,
+                    'press_time': self._mono_to_iso(key_action.press_ts),
+                    'release_time': self._mono_to_iso(key_action.release_ts),
+                    'delta_time': self._duration_ms(
+                        key_action.press_ts, key_action.release_ts
+                    ),
+                })
+        else:
+            for key_name in action.keys_pressed:
+                keys_list.append({
+                    'key': key_name,
+                    'press_time': self._mono_to_iso(action.event_ts),
+                    'release_time': self._mono_to_iso(action.event_ts),
+                    'delta_time': 0.0,
+                })
 
+        mouse_list = []
+        if action.button_name:
+            press_ts = action.press_ts if getattr(action, 'press_ts', 0) > 0 else action.event_ts
+            release_ts = action.release_ts if getattr(action, 'release_ts', 0) > 0 else action.event_ts
+            is_drag = action.type == 'drag'
+            mouse_list.append({
+                'button': action.button_name,
+                'press_coords': (
+                    action.press_x, action.press_y
+                ) if is_drag else (action.x, action.y),
+                'release_coords': (
+                    action.release_x, action.release_y
+                ) if is_drag else (action.x, action.y),
+                'press_time': self._mono_to_iso(press_ts),
+                'release_time': self._mono_to_iso(release_ts),
+                'delta_time': self._duration_ms(press_ts, release_ts),
+            })
+
+        # Build action details
+        action_details = {
+            'mouse': mouse_list,
+            'keys': keys_list,
+            'scroll': {
+                'dx_total': action.scroll_dx,
+                'dy_total': action.scroll_dy,
+                'direction': 'down' if action.scroll_dy < 0 else 'up' if action.scroll_dy > 0 else 'horizontal' if action.scroll_dx != 0 else 'none'
+            },
+            'pre_degraded': action.pre_degraded,
+            'pre_frame_ts': self._mono_to_unix_ts(action.pre_frame_ts),
+            'post_frame_ts': self._mono_to_unix_ts(action.post_frame_ts),
+            'event_ts': self._mono_to_unix_ts(action.event_ts),
+        }
+
+        # Create action record
         with self._lock:
+            if not self.current_task:
+                return
+
             rec = ActionRecord(
                 id=uuid.uuid4().hex,
                 task_id=tid,
                 task_description=self.current_task.description,
                 sequence_number=seq,
-                timestamp_before=self._pre_ss_time,
-                timestamp_action=self._action_time,
-                timestamp_after=datetime.now(timezone.utc).isoformat(),
+                timestamp_before=self._mono_to_iso(action.pre_frame_ts),
+                timestamp_action=self._mono_to_iso(action.event_ts),
+                timestamp_after=self._mono_to_iso(action.post_frame_ts),
                 elapsed_since_task_start=time.monotonic() - self.task_start_mono,
-                pre_screenshot=self._pre_ss_name,
-                post_screenshot=(name + '.png') if ok else 'FAILED',
-                action_type=action_type,
-                action_coords=action_coords,
+                pre_screenshot=pre_name,
+                post_screenshot=post_name,
+                action_type=action.type,
+                action_coords=(action.x, action.y),
                 action_details=action_details,
                 os_name=OS_NAME,
                 session_type=SESSION_TYPE,
                 screen_resolution=self.resolution,
+                pre_degraded=action.pre_degraded,
             )
             self.current_task.actions.append(asdict(rec))
-            self.data_store.save_task(self.current_task)
-            self.state = 'TASK_ACTIVE'
 
-        self.overlay.update_state('TASK_ACTIVE', f'#{seq} ✓')
-        print(f"   ✅ Action #{seq} recorded: {action_type} @ {action_coords}")
-        print(f"      (Keys: {[k['key'] for k in action_details['keys']]}, Mouse: {[m['button'] for m in action_details['mouse']]})")
-        print("   Press Ctrl+F9 for next action, or Ctrl+F12 to end task.\n")
+            # Save task JSON after each action
+            self._io_pool.submit(
+                self.data_store.save_task, self.current_task
+            )
+
+        key_names = [k['key'] for k in action_details['keys']]
+        mouse_names = [m['button'] for m in action_details['mouse']]
+        summary_parts = []
+        if key_names:
+            summary_parts.append("+".join(key_names))
+        if action.type == 'scroll':
+            summary_parts.append(f"scroll:{action_details['scroll']['direction']}")
+        elif mouse_names:
+            mouse_label = mouse_names[0]
+            if action.type == 'double_click':
+                mouse_label = f"{mouse_label} double_click"
+            elif action.type == 'drag':
+                mouse_label = f"{mouse_label} drag"
+            else:
+                mouse_label = f"{mouse_label} click"
+            summary_parts.append(mouse_label)
+        operation_summary = " + ".join(summary_parts) if summary_parts else action.type
+
+        status = "⚠️ degraded" if action.pre_degraded else "✓"
+        print(f"   ✅ Action #{seq}: {operation_summary} @ ({action.x},{action.y}) [{status}]")
+
+    @staticmethod
+    def _save_rgb_as_png(rgb_bytes: bytes, width: int, height: int, path: str):
+        """Convert raw RGB bytes to PNG file."""
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            img = PILImage.frombytes("RGB", (width, height), rgb_bytes)
+            img.save(path, "PNG")
+        except Exception as e:
+            print(f"   ❌ Failed to save screenshot {path}: {e}")
+
+    def _cleanup(self):
+        if self.current_task:
+            self._finalize_task()
+        self.engine.stop()
+        self._io_pool.shutdown(wait=True)
+        self.overlay.stop()
+        self.data_store.save_master_index(self._all_tasks)
+        print("👋 Done.")
+        os._exit(0)
 
 
 # ============================================================
@@ -664,13 +732,21 @@ class Collector:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='CUA_Collector - UI Action Data Collector')
+    parser = argparse.ArgumentParser(description='CUA_Collector - Automated UI Action Data Collector')
     parser.add_argument('--data-dir', default='./data', help='Directory to store collected data')
-    parser.add_argument('--debounce', type=float, default=0.5, help='Debounce delay in seconds')
+    parser.add_argument('--buffer-capacity', type=int, default=10, help='Ring buffer capacity (frames)')
+    parser.add_argument('--max-width', type=int, default=3840, help='Max frame width')
+    parser.add_argument('--max-height', type=int, default=2400, help='Max frame height')
+    parser.add_argument('--fps', type=int, default=10, help='Target capture FPS')
     args = parser.parse_args()
 
-    collector = Collector(data_dir=args.data_dir)
-    collector.DEBOUNCE_SEC = args.debounce
+    collector = CollectorV2(
+        data_dir=args.data_dir,
+        buffer_capacity=args.buffer_capacity,
+        max_width=args.max_width,
+        max_height=args.max_height,
+        target_fps=args.fps,
+    )
     collector.run()
 
 

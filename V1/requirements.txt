@@ -2,4 +2,3 @@ evdev ; sys_platform == 'linux'
 mss
 pynput
 Pillow
-pybind11

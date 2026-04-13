@@ -32,7 +32,7 @@ else()
     # Fallback: scan common venv site-packages locations
     file(GLOB _PB11_CANDIDATES
         "${Python3_STDLIB}/../site-packages/pybind11/share/cmake/pybind11"
-        "${CMAKE_SOURCE_DIR}/../.venv/lib/python*/site-packages/pybind11/share/cmake/pybind11"
+        "${CMAKE_SOURCE_DIR}/.venv/lib/python*/site-packages/pybind11/share/cmake/pybind11"
     )
     if(_PB11_CANDIDATES)
         list(GET _PB11_CANDIDATES 0 _PB11_DIR)
