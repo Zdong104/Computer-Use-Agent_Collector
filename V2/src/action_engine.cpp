@@ -39,6 +39,71 @@ ActionEngine::MouseButtonState& ActionEngine::get_button_state(const std::string
     return mouse_middle_;
 }
 
+ActionEngine::PendingAction* ActionEngine::find_merge_candidate_locked(double start_ts,
+                                                                       double end_ts) {
+    PendingAction* best = nullptr;
+    double best_end = -1.0;
+
+    for (auto& pending : pending_) {
+        double pending_start = pending.event_ts;
+        double pending_end = std::max({pending.event_ts, pending.last_event_ts,
+                                       pending.release_ts});
+        bool overlaps = start_ts <= pending_end && end_ts >= pending_start;
+        if (overlaps && pending_end > best_end) {
+            best = &pending;
+            best_end = pending_end;
+        }
+    }
+    return best;
+}
+
+void ActionEngine::merge_key_into_pending_locked(PendingAction& pending,
+                                                 const RawInputEvent& down_ev,
+                                                 const RawInputEvent& up_ev,
+                                                 double press_ts,
+                                                 double release_ts) {
+    pending.raw_events.push_back(down_ev);
+    pending.raw_events.push_back(up_ev);
+    pending.keys_pressed.push_back(up_ev.key_name);
+    pending.key_actions.push_back({up_ev.key_name, press_ts, release_ts});
+    pending.event_ts = std::min(pending.event_ts, press_ts);
+    pending.last_event_ts = std::max(pending.last_event_ts, release_ts);
+    pending.required_post_ts = std::max(pending.required_post_ts,
+                                        release_ts + POST_FRAME_OFFSET);
+    pending.release_ts = std::max(pending.release_ts, release_ts);
+}
+
+void ActionEngine::merge_mouse_into_pending_locked(PendingAction& pending,
+                                                   ActionType type,
+                                                   const std::string& button_name,
+                                                   const RawInputEvent& down_ev,
+                                                   const RawInputEvent& up_ev,
+                                                   int action_x,
+                                                   int action_y,
+                                                   double press_ts,
+                                                   double release_ts,
+                                                   int press_x,
+                                                   int press_y,
+                                                   int release_x,
+                                                   int release_y) {
+    pending.type = type;
+    pending.button_name = button_name;
+    pending.x = action_x;
+    pending.y = action_y;
+    pending.press_ts = press_ts;
+    pending.release_ts = std::max(pending.release_ts, release_ts);
+    pending.press_x = press_x;
+    pending.press_y = press_y;
+    pending.release_x = release_x;
+    pending.release_y = release_y;
+    pending.event_ts = std::min(pending.event_ts, press_ts);
+    pending.last_event_ts = std::max(pending.last_event_ts, release_ts);
+    pending.required_post_ts = std::max(pending.required_post_ts,
+                                        release_ts + POST_FRAME_OFFSET);
+    pending.raw_events.push_back(down_ev);
+    pending.raw_events.push_back(up_ev);
+}
+
 // ─── Event Handlers ───────────────────────────────────────────
 
 void ActionEngine::handle_mouse_down(const RawInputEvent& ev) {
@@ -94,10 +159,26 @@ void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
     // Use the mouse-down timestamp as the event time for pre-frame lookup
     double event_ts = state.down_ts;
 
+    RawInputEvent down_ev;
+    down_ev.type = RawEventType::MOUSE_BTN_DOWN;
+    down_ev.timestamp_sec = state.down_ts;
+    down_ev.x = state.down_x;
+    down_ev.y = state.down_y;
+    down_ev.button_name = ev.button_name;
+
+    std::lock_guard lock(pending_mu_);
+
+    if (auto* existing = find_merge_candidate_locked(state.down_ts, ev.timestamp_sec);
+        existing && !existing->keys_pressed.empty() && existing->button_name.empty()) {
+        merge_mouse_into_pending_locked(*existing, type, ev.button_name, down_ev, ev,
+                                        action_x, action_y, state.down_ts, ev.timestamp_sec,
+                                        state.down_x, state.down_y, ev.x, ev.y);
+        return;
+    }
+
     auto pending = create_pending(type, event_ts, action_x, action_y,
                                    ev.button_name);
 
-    // For drag, store press/release coords
     if (type == ActionType::DRAG) {
         pending.press_x = state.down_x;
         pending.press_y = state.down_y;
@@ -108,18 +189,8 @@ void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
     pending.release_ts = ev.timestamp_sec;
     pending.required_post_ts = ev.timestamp_sec + POST_FRAME_OFFSET;
     pending.last_event_ts = ev.timestamp_sec;
-
-    // Store both down and up events
-    RawInputEvent down_ev;
-    down_ev.type = RawEventType::MOUSE_BTN_DOWN;
-    down_ev.timestamp_sec = state.down_ts;
-    down_ev.x = state.down_x;
-    down_ev.y = state.down_y;
-    down_ev.button_name = ev.button_name;
     pending.raw_events.push_back(down_ev);
     pending.raw_events.push_back(ev);
-
-    std::lock_guard lock(pending_mu_);
     pending_.push_back(std::move(pending));
 }
 
@@ -168,13 +239,6 @@ void ActionEngine::handle_key(const RawInputEvent& ev) {
 
     state.pressed = false;
 
-    auto pending = create_pending(ActionType::HOTKEY, state.down_ts,
-                                  state.down_x, state.down_y, "", 0, 0);
-    pending.press_ts = state.down_ts;
-    pending.release_ts = ev.timestamp_sec;
-    pending.required_post_ts = ev.timestamp_sec + POST_FRAME_OFFSET;
-    pending.last_event_ts = ev.timestamp_sec;
-
     RawInputEvent down_ev;
     down_ev.type = RawEventType::KEYBOARD_DOWN;
     down_ev.timestamp_sec = state.down_ts;
@@ -182,6 +246,18 @@ void ActionEngine::handle_key(const RawInputEvent& ev) {
     down_ev.y = state.down_y;
     down_ev.key_code = ev.key_code;
     down_ev.key_name = ev.key_name;
+
+    if (auto* existing = find_merge_candidate_locked(state.down_ts, ev.timestamp_sec)) {
+        merge_key_into_pending_locked(*existing, down_ev, ev, state.down_ts, ev.timestamp_sec);
+        return;
+    }
+
+    auto pending = create_pending(ActionType::HOTKEY, state.down_ts,
+                                  state.down_x, state.down_y, "", 0, 0);
+    pending.press_ts = state.down_ts;
+    pending.release_ts = ev.timestamp_sec;
+    pending.required_post_ts = ev.timestamp_sec + POST_FRAME_OFFSET;
+    pending.last_event_ts = ev.timestamp_sec;
 
     pending.raw_events.push_back(std::move(down_ev));
     pending.raw_events.push_back(ev);

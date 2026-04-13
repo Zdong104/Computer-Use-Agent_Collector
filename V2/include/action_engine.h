@@ -252,6 +252,25 @@ private:
     // Helper: finalize a pending action with a post-frame
     CompletedAction finalize_action(PendingAction& pending,
                                      const FrameSlot& post_frame);
+    PendingAction* find_merge_candidate_locked(double start_ts, double end_ts);
+    void merge_key_into_pending_locked(PendingAction& pending,
+                                       const RawInputEvent& down_ev,
+                                       const RawInputEvent& up_ev,
+                                       double press_ts,
+                                       double release_ts);
+    void merge_mouse_into_pending_locked(PendingAction& pending,
+                                         ActionType type,
+                                         const std::string& button_name,
+                                         const RawInputEvent& down_ev,
+                                         const RawInputEvent& up_ev,
+                                         int action_x,
+                                         int action_y,
+                                         double press_ts,
+                                         double release_ts,
+                                         int press_x,
+                                         int press_y,
+                                         int release_x,
+                                         int release_y);
 
     MouseButtonState& get_button_state(const std::string& name);
 

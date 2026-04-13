@@ -186,6 +186,7 @@ class StatusOverlay:
         self._running = False
         self._pending_state = 'IDLE'
         self._pending_text = None
+        self._dialog = None
 
     def start(self):
         self._running = True
@@ -261,7 +262,13 @@ class StatusOverlay:
     def _create_dialog(self):
         import tkinter as tk
 
+        if self._dialog is not None and self._dialog.winfo_exists():
+            self._dialog.lift()
+            self._dialog.focus_force()
+            return
+
         dialog = tk.Toplevel(self._root)
+        self._dialog = dialog
         dialog.title("New Task")
         dialog.attributes('-topmost', True)
         dialog.transient(self._root)
@@ -285,12 +292,8 @@ class StatusOverlay:
                 dialog.grab_release()
             except Exception:
                 pass
-            try:
-                dialog.withdraw()
-                dialog.update_idletasks()
-            except Exception:
-                pass
-            dialog.after_idle(dialog.destroy)
+            self._dialog = None
+            dialog.destroy()
 
         def submit(e=None):
             content = text.get('1.0', 'end-1c').strip()
@@ -500,6 +503,8 @@ class CollectorV2:
             if self.state != 'IDLE':
                 print("⚠️  Task already active. End it first (Ctrl+F12).")
                 return
+            # Prevent duplicate Ctrl+F8 handling while the description dialog is open.
+            self.state = 'TASK_ACTIVE'
 
         print("\n📋 Starting new task…")
         self.overlay.update_state('TASK_ACTIVE', 'Enter description…')
@@ -507,6 +512,8 @@ class CollectorV2:
         desc = self.overlay.ask_description()
         if not desc:
             print("❌ Cancelled.")
+            with self._lock:
+                self.state = 'IDLE'
             self.overlay.update_state('IDLE')
             return
 
