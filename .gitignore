@@ -16,4 +16,7 @@ data/
 *.mp4
 *.gif
 
+# Generated build trees
+build/
+V2/build/
 
