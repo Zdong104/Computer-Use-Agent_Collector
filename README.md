@@ -19,7 +19,6 @@ Legacy manual collector is archived under [`V1/`](./V1) and deprecated.
 ├── run.sh                # Ubuntu Wayland/GNOME launcher
 ├── run_x11.sh            # Linux Xorg/X11 launcher
 ├── run_win.ps1           # Windows PowerShell launcher
-├── run_win.sh            # Windows Git Bash/MSYS/Cygwin launcher
 ├── run_mac.sh            # macOS launcher
 ├── CMakeLists.txt        # native module build (Linux + Windows)
 ├── include/ src/ tests/  # C++ capture engine and platform backends
@@ -34,7 +33,7 @@ All launchers run the root V2 collector and keep the same usage style:
 ```bash
 ./run.sh
 ./run_x11.sh
-./run_win.sh
+./run_win.ps1
 ./run_mac.sh
 ```
 
@@ -91,20 +90,6 @@ This path uses the V2 cross-platform backend: `mss` for screenshots and
 
 ### Windows
 
-Prerequisites:
-
-- Install CMake for Windows and enable the installer option that adds CMake to
-  `PATH`. With Chocolatey, run `choco install cmake --installargs
-  'ADD_CMAKE_TO_PATH=System' -y`; this is separate from the Visual Studio C++
-  workload.
-- Install Visual Studio Build Tools with the "Desktop development with C++"
-  workload, including the MSVC compiler and a Windows SDK.
-- Close and reopen PowerShell after installing them, then confirm
-  `cmake --version` works. If CMake is installed but not on `PATH`, use
-  `& "C:\Program Files\CMake\bin\cmake.exe"` in place of `cmake`.
-
-From PowerShell:
-
 ```powershell
 git clone https://github.com/Zdong104/CUA_Collector.git
 cd CUA_Collector
@@ -127,12 +112,6 @@ If script execution is blocked, use:
 powershell -ExecutionPolicy Bypass -File .\run_win.ps1
 ```
 
-If you prefer Git Bash/MSYS/Cygwin, launch with:
-
-```bash
-./run_win.sh
-```
-
 If you are already inside Git Bash, the equivalent build command is:
 
 ```bash
@@ -146,8 +125,7 @@ If the native module is not built, `run_win.sh` falls back to the Python
 `mss+pynput` backend so the expected launcher still works.
 
 Windows may require allowing Python/Terminal through privacy or security prompts
-before global input monitoring works. To force the Python backend explicitly,
-run `CUA_CAPTURE_BACKEND=python ./run_win.sh`.
+before global input monitoring works.
 
 ### macOS
 
