@@ -626,24 +626,26 @@ class CollectorV2:
 
         # V1 compatibility: Keys are a list of dicts.
         keys_list = []
-        if hasattr(action, 'key_actions') and action.key_actions:
-            for key_action in action.key_actions:
-                keys_list.append({
-                    'key': key_action.key_name,
-                    'press_time': self._mono_to_iso(key_action.press_ts),
-                    'release_time': self._mono_to_iso(key_action.release_ts),
-                    'delta_time': self._duration_ms(
-                        key_action.press_ts, key_action.release_ts
-                    ),
-                })
-        else:
-            for key_name in action.keys_pressed:
-                keys_list.append({
-                    'key': key_name,
-                    'press_time': self._mono_to_iso(action.event_ts),
-                    'release_time': self._mono_to_iso(action.event_ts),
-                    'delta_time': 0.0,
-                })
+        key_actions = list(getattr(action, 'key_actions', []) or [])
+        key_records = {record.key_name: record for record in key_actions}
+        ordered_keys = list(getattr(action, 'keys_pressed', []) or [])
+        if not ordered_keys:
+            ordered_keys = [record.key_name for record in key_actions]
+
+        for key_name in ordered_keys:
+            key_action = key_records.get(key_name)
+            if key_action is not None:
+                press_ts = key_action.press_ts
+                release_ts = key_action.release_ts
+            else:
+                press_ts = action.event_ts
+                release_ts = action.event_ts
+            keys_list.append({
+                'key': key_name,
+                'press_time': self._mono_to_iso(press_ts),
+                'release_time': self._mono_to_iso(release_ts),
+                'delta_time': self._duration_ms(press_ts, release_ts),
+            })
 
         mouse_list = []
         if action.button_name:

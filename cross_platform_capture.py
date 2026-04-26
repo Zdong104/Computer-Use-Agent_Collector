@@ -161,7 +161,9 @@ class CaptureEngine:
 
         self._ctrl_pressed = False
         self._active_keys: Dict[str, float] = {}
-        self._active_buttons: Dict[str, Tuple[float, int, int]] = {}
+        self._consumed_modifiers = set()
+        self._consumed_keys = set()
+        self._active_buttons: Dict[str, Tuple[float, int, int, List[str]]] = {}
         self._last_click_ts = 0.0
         self._last_click_x = 0
         self._last_click_y = 0
@@ -246,7 +248,8 @@ class CaptureEngine:
         self, ts: float, x: int, y: int, button: str = "left"
     ):
         self._enqueue_mouse_action(
-            "click", ts, x, y, button, x, y, x, y, ts, ts + 0.05
+            "click", ts, x, y, button, x, y, x, y, ts, ts + 0.05,
+            self._active_modifiers()
         )
 
     def inject_mouse_drag(
@@ -271,7 +274,31 @@ class CaptureEngine:
             release_y,
             ts,
             ts + duration,
+            self._active_modifiers(),
         )
+
+    def inject_mouse_double_click(
+        self, ts: float, x: int, y: int, button: str = "left"
+    ):
+        self._enqueue_mouse_action(
+            "double_click", ts, x, y, button, x, y, x, y, ts, ts + 0.15,
+            self._active_modifiers()
+        )
+
+    def inject_key_event(
+        self,
+        ts: float,
+        key_name: str,
+        pressed: bool,
+        x: int = 0,
+        y: int = 0,
+    ):
+        self._cursor_pos = (int(x), int(y))
+        self._handle_key_event(key_name, pressed, ts)
+
+    def inject_scroll(self, ts: float, x: int, y: int, dx: int, dy: int):
+        self._cursor_pos = (int(x), int(y))
+        self._enqueue_scroll_action(ts, int(x), int(y), int(dx), int(dy))
 
     def inject_frame(self, ts: float, width: int, height: int):
         rgb = bytes([128]) * (width * height * 3)
@@ -331,11 +358,19 @@ class CaptureEngine:
         self._cursor_pos = (x, y)
 
         if pressed:
-            self._active_buttons[button_name] = (now, x, y)
+            self._active_buttons[button_name] = (
+                now,
+                x,
+                y,
+                self._active_modifiers(),
+            )
             return
 
-        down_ts, down_x, down_y = self._active_buttons.pop(
-            button_name, (now, x, y)
+        down_ts, down_x, down_y, down_modifiers = self._active_buttons.pop(
+            button_name, (now, x, y, [])
+        )
+        action_modifiers = self._merge_modifier_lists(
+            down_modifiers, self._active_modifiers()
         )
         hold_time = max(0.0, now - down_ts)
         distance = math.hypot(x - down_x, y - down_y)
@@ -371,6 +406,7 @@ class CaptureEngine:
             y,
             down_ts,
             now,
+            action_modifiers,
         )
 
     def _on_scroll(self, x: int, y: int, dx: int, dy: int):
@@ -401,7 +437,7 @@ class CaptureEngine:
         if key == keyboard.Key.esc:
             self._push_hotkey(HotkeyType.DROP_ACTION)
 
-        self._active_keys.setdefault(key_name, now)
+        self._handle_key_event(key_name, True, now)
 
     def _on_key_release(self, key):
         from pynput import keyboard
@@ -411,20 +447,10 @@ class CaptureEngine:
         if not key_name:
             return
 
-        press_ts = self._active_keys.pop(key_name, now)
-
         if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
             self._ctrl_pressed = False
 
-        held_ms = (now - press_ts) * 1000.0
-        if key_name in self._modifier_names() and held_ms < self.MODIFIER_DEBOUNCE_MS:
-            return
-
-        combo = list(self._active_keys.keys()) + [key_name]
-        if self._is_plain_key_noise(combo):
-            return
-
-        self._enqueue_key_action(press_ts, now, combo, key_name)
+        self._handle_key_event(key_name, False, now)
 
     def _push_hotkey(self, hotkey: HotkeyType):
         with self._hotkey_mu:
@@ -443,6 +469,7 @@ class CaptureEngine:
         release_y: int,
         press_ts: float,
         release_ts: float,
+        modifiers: Optional[List[str]] = None,
     ):
         pending = self._create_pending(action_type, event_ts, x, y)
         pending.button_name = button_name
@@ -454,9 +481,11 @@ class CaptureEngine:
         pending.release_ts = release_ts
         pending.last_event_ts = release_ts
         pending.required_post_ts = release_ts + self.POST_FRAME_OFFSET
+        self._attach_keys_to_pending(pending, modifiers or [], release_ts)
         self._add_pending(pending)
 
     def _enqueue_scroll_action(self, event_ts: float, x: int, y: int, dx: int, dy: int):
+        modifiers = self._active_modifiers()
         with self._pending_mu:
             if self._pending:
                 last = self._pending[-1]
@@ -468,25 +497,135 @@ class CaptureEngine:
                     last.scroll_dy += dy
                     last.last_event_ts = event_ts
                     last.required_post_ts = event_ts + self.POST_FRAME_OFFSET
+                    self._attach_keys_to_pending(last, modifiers, event_ts)
                     return
 
         pending = self._create_pending("scroll", event_ts, x, y)
         pending.scroll_dx = dx
         pending.scroll_dy = dy
         pending.last_event_ts = event_ts
+        self._attach_keys_to_pending(pending, modifiers, event_ts)
         self._add_pending(pending)
 
     def _enqueue_key_action(
-        self, press_ts: float, release_ts: float, combo: List[str], key_name: str
+        self,
+        press_ts: float,
+        release_ts: float,
+        combo: List[str],
+        key_name: str,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
     ):
-        x, y = self._cursor_pos
+        if x is None or y is None:
+            x, y = self._cursor_pos
         pending = self._create_pending("hotkey", press_ts, x, y)
-        pending.keys_pressed = combo
-        pending.key_actions = [KeyActionRecord(key_name, press_ts, release_ts)]
         pending.release_ts = release_ts
         pending.last_event_ts = release_ts
         pending.required_post_ts = release_ts + self.POST_FRAME_OFFSET
+        self._attach_keys_to_pending(
+            pending, combo, release_ts, key_name, press_ts, release_ts
+        )
         self._add_pending(pending)
+
+    def _handle_key_event(self, key_name: str, pressed: bool, ts: float):
+        if pressed:
+            if key_name not in self._active_keys:
+                self._active_keys[key_name] = ts
+                if key_name in self._modifier_names():
+                    self._consumed_modifiers.discard(key_name)
+                else:
+                    self._consumed_keys.discard(key_name)
+            return
+
+        if key_name not in self._active_keys:
+            return
+
+        press_ts = self._active_keys[key_name]
+        if key_name in self._modifier_names():
+            modifiers = self._active_modifiers()
+            active_non_modifiers = [
+                key for key in self._active_keys if key not in self._modifier_names()
+            ]
+            held_ms = (ts - press_ts) * 1000.0
+            if held_ms >= self.MODIFIER_DEBOUNCE_MS:
+                for trigger_key in active_non_modifiers:
+                    if trigger_key in self._consumed_keys:
+                        continue
+                    combo = self._append_unique(list(modifiers), trigger_key)
+                    self._enqueue_key_action(
+                        self._active_keys[trigger_key],
+                        ts,
+                        combo,
+                        trigger_key,
+                        *self._cursor_pos,
+                    )
+                    self._consumed_keys.add(trigger_key)
+            self._active_keys.pop(key_name, None)
+            self._consumed_modifiers.discard(key_name)
+            return
+
+        modifiers = self._active_modifiers()
+        combo = self._append_unique(list(modifiers), key_name)
+        self._active_keys.pop(key_name, None)
+
+        if key_name in self._consumed_keys:
+            self._consumed_keys.discard(key_name)
+            return
+        if self._is_plain_key_noise(combo):
+            return
+
+        self._enqueue_key_action(press_ts, ts, combo, key_name)
+
+    def _active_modifiers(self) -> List[str]:
+        modifier_names = self._modifier_names()
+        return [key for key in self._active_keys if key in modifier_names]
+
+    @staticmethod
+    def _append_unique(keys: List[str], key_name: str) -> List[str]:
+        if key_name not in keys:
+            keys.append(key_name)
+        return keys
+
+    @staticmethod
+    def _merge_modifier_lists(first: List[str], second: List[str]) -> List[str]:
+        merged: List[str] = []
+        for key in first + second:
+            if key not in merged:
+                merged.append(key)
+        return merged
+
+    def _attach_keys_to_pending(
+        self,
+        pending: _PendingAction,
+        keys: List[str],
+        action_release_ts: float,
+        trigger_key: str = "",
+        trigger_press_ts: float = 0.0,
+        trigger_release_ts: float = 0.0,
+    ):
+        for key in keys:
+            if key not in pending.keys_pressed:
+                pending.keys_pressed.append(key)
+
+            if key == trigger_key:
+                press_ts = trigger_press_ts
+                release_ts = trigger_release_ts
+            else:
+                press_ts = self._active_keys.get(key, pending.event_ts)
+                release_ts = action_release_ts
+
+            existing = next(
+                (record for record in pending.key_actions if record.key_name == key),
+                None,
+            )
+            if existing is None:
+                pending.key_actions.append(KeyActionRecord(key, press_ts, release_ts))
+            elif key != trigger_key:
+                existing.release_ts = max(existing.release_ts, release_ts)
+
+        for key in keys:
+            if key in self._modifier_names():
+                self._consumed_modifiers.add(key)
 
     def _create_pending(self, action_type: str, event_ts: float, x: int, y: int):
         target_ts = event_ts - self.PRE_FRAME_OFFSET
@@ -621,10 +760,7 @@ class CaptureEngine:
 
     @staticmethod
     def _is_plain_key_noise(combo: List[str]) -> bool:
-        if len(combo) != 1:
-            return False
-        key = combo[0]
-        return len(key) == 1 and key.isalnum()
+        return bool(combo) and all(len(key) == 1 and key.isalnum() for key in combo)
 
     def _to_capture_coords(self, x: int, y: int) -> Tuple[int, int]:
         left, top = self._capture_origin

@@ -176,6 +176,30 @@ public:
         engine_.inject_event(up);
     }
 
+    /// Inject a synthetic keyboard event (for testing)
+    void inject_key_event(double ts, const std::string& key_name, bool pressed,
+                          int x = 0, int y = 0) {
+        RawInputEvent ev;
+        ev.type = pressed ? RawEventType::KEYBOARD_DOWN : RawEventType::KEYBOARD_UP;
+        ev.timestamp_sec = ts;
+        ev.key_name = key_name;
+        ev.x = x;
+        ev.y = y;
+        engine_.inject_event(std::move(ev));
+    }
+
+    /// Inject a synthetic scroll event (for testing)
+    void inject_scroll(double ts, int x, int y, int dx, int dy) {
+        RawInputEvent ev;
+        ev.type = RawEventType::SCROLL_EVENT;
+        ev.timestamp_sec = ts;
+        ev.x = x;
+        ev.y = y;
+        ev.scroll_dx = dx;
+        ev.scroll_dy = dy;
+        engine_.inject_event(std::move(ev));
+    }
+
     /// Inject a synthetic frame into the ring buffer (for testing)
     void inject_frame(double ts, int width, int height) {
         auto& slot = buffer_.begin_write();
@@ -334,6 +358,16 @@ PYBIND11_MODULE(cua_capture, m) {
              py::arg("button") = "left",
              py::arg("duration") = 0.5,
              "Inject a synthetic mouse drag (for testing)")
+        .def("inject_key_event",
+             &cua::CaptureEngine::inject_key_event,
+             py::arg("ts"), py::arg("key_name"), py::arg("pressed"),
+             py::arg("x") = 0, py::arg("y") = 0,
+             "Inject a synthetic keyboard event (for testing)")
+        .def("inject_scroll",
+             &cua::CaptureEngine::inject_scroll,
+             py::arg("ts"), py::arg("x"), py::arg("y"),
+             py::arg("dx"), py::arg("dy"),
+             "Inject a synthetic scroll event (for testing)")
         .def("inject_frame",
              &cua::CaptureEngine::inject_frame,
              py::arg("ts"), py::arg("width"), py::arg("height"),

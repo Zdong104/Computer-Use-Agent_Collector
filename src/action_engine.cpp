@@ -41,6 +41,21 @@ static bool is_plain_number(const std::string& name) {
     return name.size() == 1 && name[0] >= '0' && name[0] <= '9';
 }
 
+static bool is_plain_key_noise_combo(const std::vector<std::string>& combo) {
+    if (combo.empty()) return true;
+    for (const auto& k : combo) {
+        if (!is_plain_letter(k) && !is_plain_number(k)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool contains_key(const std::vector<std::string>& keys,
+                         const std::string& key_name) {
+    return std::find(keys.begin(), keys.end(), key_name) != keys.end();
+}
+
 ActionEngine::ActionEngine(RingBuffer& buffer, InputMonitor& input)
     : buffer_(buffer), input_(input) {
     // Pre-allocate capacity for stress test (200 actions + margin).
@@ -83,6 +98,105 @@ ActionEngine::PendingAction* ActionEngine::find_merge_candidate_locked(double st
     return best;
 }
 
+bool ActionEngine::has_active_key_locked(const std::string& key_name) const {
+    return active_keys_.find(key_name) != active_keys_.end();
+}
+
+void ActionEngine::erase_active_key_locked(const std::string& key_name) {
+    active_keys_.erase(key_name);
+    key_order_.erase(std::remove(key_order_.begin(), key_order_.end(), key_name),
+                     key_order_.end());
+}
+
+std::vector<std::string> ActionEngine::active_modifiers_locked() const {
+    std::vector<std::string> modifiers;
+    for (const auto& key_name : key_order_) {
+        if (has_active_key_locked(key_name) && is_modifier_key(key_name)) {
+            modifiers.push_back(key_name);
+        }
+    }
+    return modifiers;
+}
+
+std::vector<std::string> ActionEngine::active_non_modifiers_locked() const {
+    std::vector<std::string> keys;
+    for (const auto& key_name : key_order_) {
+        if (has_active_key_locked(key_name) && !is_modifier_key(key_name)) {
+            keys.push_back(key_name);
+        }
+    }
+    return keys;
+}
+
+std::vector<std::string> ActionEngine::merge_modifier_sets_locked(
+    const std::vector<std::string>& first,
+    const std::vector<std::string>& second) const {
+    std::vector<std::string> merged;
+    for (const auto& key_name : key_order_) {
+        if (!is_modifier_key(key_name)) continue;
+        if ((contains_key(first, key_name) || contains_key(second, key_name)) &&
+            !contains_key(merged, key_name)) {
+            merged.push_back(key_name);
+        }
+    }
+    for (const auto& key_name : first) {
+        if (is_modifier_key(key_name) && !contains_key(merged, key_name)) {
+            merged.push_back(key_name);
+        }
+    }
+    for (const auto& key_name : second) {
+        if (is_modifier_key(key_name) && !contains_key(merged, key_name)) {
+            merged.push_back(key_name);
+        }
+    }
+    return merged;
+}
+
+void ActionEngine::mark_modifiers_consumed_locked(const std::vector<std::string>& keys) {
+    for (const auto& key_name : keys) {
+        if (is_modifier_key(key_name)) {
+            consumed_modifiers_.insert(key_name);
+        }
+    }
+}
+
+void ActionEngine::attach_keys_to_pending_locked(PendingAction& pending,
+                                                 const std::vector<std::string>& keys,
+                                                 double action_release_ts,
+                                                 const std::string& trigger_key,
+                                                 double trigger_press_ts,
+                                                 double trigger_release_ts) {
+    for (const auto& key_name : keys) {
+        if (!contains_key(pending.keys_pressed, key_name)) {
+            pending.keys_pressed.push_back(key_name);
+        }
+
+        double press_ts = trigger_press_ts;
+        double release_ts = trigger_release_ts;
+        if (key_name != trigger_key) {
+            auto state_it = key_states_.find(key_name);
+            press_ts = state_it != key_states_.end() ? state_it->second.down_ts
+                                                     : pending.event_ts;
+            release_ts = action_release_ts;
+        }
+
+        bool has_record = false;
+        for (auto& record : pending.key_actions) {
+            if (record.key_name == key_name) {
+                has_record = true;
+                if (key_name != trigger_key) {
+                    record.release_ts = std::max(record.release_ts, release_ts);
+                }
+                break;
+            }
+        }
+        if (!has_record) {
+            pending.key_actions.push_back({key_name, press_ts, release_ts});
+        }
+    }
+    mark_modifiers_consumed_locked(keys);
+}
+
 void ActionEngine::merge_key_into_pending_locked(PendingAction& pending,
                                                  const RawInputEvent& down_ev,
                                                  const RawInputEvent& up_ev,
@@ -95,14 +209,8 @@ void ActionEngine::merge_key_into_pending_locked(PendingAction& pending,
     pending.last_event_ts = std::max(pending.last_event_ts, release_ts);
     pending.required_post_ts = std::max(pending.required_post_ts,
                                         release_ts + POST_FRAME_OFFSET);
-    // Record the full key combination if provided (state-based tracking).
-    if (!combo.empty()) {
-        // Append the combo keys (deduplicate against existing keys_pressed).
-        for (const auto& k : combo) {
-            pending.keys_pressed.push_back(k);
-        }
-    }
-    pending.key_actions.push_back({up_ev.key_name, press_ts, release_ts});
+    attach_keys_to_pending_locked(pending, combo, release_ts,
+                                  up_ev.key_name, press_ts, release_ts);
     pending.release_ts = std::max(pending.release_ts, release_ts);
 }
 
@@ -145,6 +253,8 @@ void ActionEngine::handle_mouse_down(const RawInputEvent& ev) {
     state.down_ts = ev.timestamp_sec;
     state.down_x = ev.x;
     state.down_y = ev.y;
+    std::lock_guard lock(pending_mu_);
+    state.down_modifiers = active_modifiers_locked();
 }
 
 void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
@@ -200,12 +310,16 @@ void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
     down_ev.button_name = ev.button_name;
 
     std::lock_guard lock(pending_mu_);
+    const auto release_modifiers = active_modifiers_locked();
+    const auto action_modifiers = merge_modifier_sets_locked(state.down_modifiers,
+                                                             release_modifiers);
 
     if (auto* existing = find_merge_candidate_locked(state.down_ts, ev.timestamp_sec);
         existing && !existing->keys_pressed.empty() && existing->button_name.empty()) {
         merge_mouse_into_pending_locked(*existing, type, ev.button_name, down_ev, ev,
                                         action_x, action_y, state.down_ts, ev.timestamp_sec,
                                         state.down_x, state.down_y, ev.x, ev.y);
+        attach_keys_to_pending_locked(*existing, action_modifiers, ev.timestamp_sec);
         return;
     }
 
@@ -224,6 +338,7 @@ void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
         pending.last_event_ts = ev.timestamp_sec;
         pending.raw_events.push_back(down_ev);
         pending.raw_events.push_back(ev);
+        attach_keys_to_pending_locked(pending, action_modifiers, ev.timestamp_sec);
         pending_.push_back(std::move(pending));
     } else if (type == ActionType::CLICK) {
         // This is a potential first click - delay recording it
@@ -235,6 +350,7 @@ void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
         pending.last_event_ts = ev.timestamp_sec;
         pending.raw_events.push_back(down_ev);
         pending.raw_events.push_back(ev);
+        attach_keys_to_pending_locked(pending, action_modifiers, ev.timestamp_sec);
 
         // If another non-double-click arrives before the previous click timeout
         // has been processed, preserve the previous click instead of replacing it.
@@ -261,12 +377,14 @@ void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
         pending.last_event_ts = ev.timestamp_sec;
         pending.raw_events.push_back(down_ev);
         pending.raw_events.push_back(ev);
+        attach_keys_to_pending_locked(pending, action_modifiers, ev.timestamp_sec);
         pending_.push_back(std::move(pending));
     }
 }
 
 void ActionEngine::handle_scroll(const RawInputEvent& ev) {
     std::lock_guard lock(pending_mu_);
+    const auto modifiers = active_modifiers_locked();
 
     // Check if we can merge with an existing scroll pending action
     for (auto& p : pending_) {
@@ -279,6 +397,7 @@ void ActionEngine::handle_scroll(const RawInputEvent& ev) {
             // Update required post time to after the latest scroll
             p.required_post_ts = ev.timestamp_sec + POST_FRAME_OFFSET;
             p.raw_events.push_back(ev);
+            attach_keys_to_pending_locked(p, modifiers, ev.timestamp_sec);
             return;
         }
     }
@@ -288,6 +407,7 @@ void ActionEngine::handle_scroll(const RawInputEvent& ev) {
                                    ev.x, ev.y, "",
                                    ev.scroll_dx, ev.scroll_dy);
     pending.raw_events.push_back(ev);
+    attach_keys_to_pending_locked(pending, modifiers, ev.timestamp_sec);
     pending_.push_back(std::move(pending));
 }
 
@@ -298,13 +418,16 @@ void ActionEngine::handle_key(const RawInputEvent& ev) {
 
     if (is_down) {
         // ── Key press: add to active set ───────────────────────────
-        if (is_modifier_key(ev.key_name)) {
-            modifier_press_ts_[ev.key_name] = ev.timestamp_sec;
-        }
-        active_keys_.insert(ev.key_name);
-
         auto& state = key_states_[ev.key_name];
         if (!state.pressed) {
+            if (is_modifier_key(ev.key_name)) {
+                modifier_press_ts_[ev.key_name] = ev.timestamp_sec;
+                consumed_modifiers_.erase(ev.key_name);
+            } else {
+                consumed_keys_.erase(ev.key_name);
+            }
+            active_keys_.insert(ev.key_name);
+            key_order_.push_back(ev.key_name);
             state.pressed = true;
             state.down_ts = ev.timestamp_sec;
             state.down_x = ev.x;
@@ -315,91 +438,116 @@ void ActionEngine::handle_key(const RawInputEvent& ev) {
 
     // ── Key release: record combination ──────────────────────────
 
-    // Debounce: skip modifier releases that were held for less than the threshold.
-    // This filters out accidental modifier taps.
-    if (is_modifier_key(ev.key_name)) {
-        auto it = modifier_press_ts_.find(ev.key_name);
-        if (it != modifier_press_ts_.end()) {
-            double elapsed_ms = (ev.timestamp_sec - it->second) * 1000.0;
-            modifier_press_ts_.erase(it);
-            if (elapsed_ms < MODIFIER_DEBOUNCE_MS) {
-                // Accidental modifier tap — remove from active set and skip.
-                active_keys_.erase(ev.key_name);
-                return;
-            }
-        }
-    }
-
-    // Snapshot the full active combination BEFORE removing the released key.
-    // This captures modifiers that were held simultaneously with the released key.
-    std::vector<std::string> combo;
-    combo.reserve(active_keys_.size());
-    for (const auto& k : active_keys_) {
-        combo.push_back(k);
-    }
-
-    // Only skip recording if the combo contains ONLY plain letters and/or numbers.
-    // This filters out typing noise (e.g. "h", "j", "5") but still records
-    // esc, backspace, delete, f1-f12, arrows, enter, tab, space, punctuation, etc.
-    bool only_plain_alpha_or_num = !combo.empty();
-    for (const auto& k : combo) {
-        if (!is_plain_letter(k) && !is_plain_number(k)) {
-            only_plain_alpha_or_num = false;
-            break;
-        }
-    }
-    if (only_plain_alpha_or_num) {
-        // Plain typing — don't record. Remove released key from active set and return.
-        active_keys_.erase(ev.key_name);
-        auto& state = key_states_[ev.key_name];
-        state.pressed = false;
-        return;
-    }
-
-    // Remove the released key from the active set.
-    active_keys_.erase(ev.key_name);
-
     // Retrieve stored state for this key release.
     auto& state = key_states_[ev.key_name];
     const bool had_press = state.pressed;
     const double press_ts = state.down_ts;
     const double release_ts = ev.timestamp_sec;
-    state.pressed = false;
 
     if (!had_press) return;  // Spurious up without down
 
-    // Rebuild the synthetic KEYBOARD_DOWN event from stored state.
-    RawInputEvent down_ev;
-    down_ev.type = RawEventType::KEYBOARD_DOWN;
-    down_ev.timestamp_sec = press_ts;
-    down_ev.x = state.down_x;
-    down_ev.y = state.down_y;
-    down_ev.key_code = ev.key_code;
-    down_ev.key_name = ev.key_name;
+    auto record_key_action = [&](const std::vector<std::string>& combo,
+                                 const std::string& trigger_key,
+                                 double trigger_press_ts,
+                                 double trigger_release_ts,
+                                 int trigger_x,
+                                 int trigger_y,
+                                 bool allow_merge) {
+        RawInputEvent down_ev;
+        down_ev.type = RawEventType::KEYBOARD_DOWN;
+        down_ev.timestamp_sec = trigger_press_ts;
+        down_ev.x = trigger_x;
+        down_ev.y = trigger_y;
+        down_ev.key_name = trigger_key;
 
-    // Try to merge with an overlapping mouse/other pending action.
-    if (auto* existing = find_merge_candidate_locked(press_ts, release_ts)) {
-        merge_key_into_pending_locked(*existing, down_ev, ev, press_ts, release_ts,
-                                      combo);
+        RawInputEvent up_ev;
+        up_ev.type = RawEventType::KEYBOARD_UP;
+        up_ev.timestamp_sec = trigger_release_ts;
+        up_ev.x = ev.x;
+        up_ev.y = ev.y;
+        up_ev.key_name = trigger_key;
+
+        if (allow_merge) {
+            if (auto* existing = find_merge_candidate_locked(trigger_press_ts,
+                                                             trigger_release_ts)) {
+                merge_key_into_pending_locked(*existing, down_ev, up_ev,
+                                              trigger_press_ts, trigger_release_ts,
+                                              combo);
+                return;
+            }
+        }
+
+        auto pending = create_pending(ActionType::HOTKEY, trigger_press_ts,
+                                      trigger_x, trigger_y, "", 0, 0);
+        pending.press_ts = trigger_press_ts;
+        pending.release_ts = trigger_release_ts;
+        pending.required_post_ts = trigger_release_ts + POST_FRAME_OFFSET;
+        pending.last_event_ts = trigger_release_ts;
+        pending.raw_events.push_back(std::move(down_ev));
+        pending.raw_events.push_back(std::move(up_ev));
+        attach_keys_to_pending_locked(pending, combo, trigger_release_ts,
+                                      trigger_key, trigger_press_ts,
+                                      trigger_release_ts);
+        pending_.push_back(std::move(pending));
+    };
+
+    if (is_modifier_key(ev.key_name)) {
+        std::vector<std::string> modifiers = active_modifiers_locked();
+        std::vector<std::string> active_non_modifiers = active_non_modifiers_locked();
+
+        auto it = modifier_press_ts_.find(ev.key_name);
+        if (it != modifier_press_ts_.end()) {
+            const double elapsed_ms = (release_ts - it->second) * 1000.0;
+            modifier_press_ts_.erase(it);
+            if (elapsed_ms < MODIFIER_DEBOUNCE_MS) {
+                erase_active_key_locked(ev.key_name);
+                state.pressed = false;
+                consumed_modifiers_.erase(ev.key_name);
+                return;
+            }
+        }
+
+        for (const auto& trigger_key : active_non_modifiers) {
+            if (consumed_keys_.find(trigger_key) != consumed_keys_.end()) {
+                continue;
+            }
+            auto trigger_it = key_states_.find(trigger_key);
+            if (trigger_it == key_states_.end() || !trigger_it->second.pressed) {
+                continue;
+            }
+            std::vector<std::string> combo = modifiers;
+            if (!contains_key(combo, trigger_key)) {
+                combo.push_back(trigger_key);
+            }
+            record_key_action(combo, trigger_key, trigger_it->second.down_ts,
+                              release_ts, trigger_it->second.down_x,
+                              trigger_it->second.down_y, false);
+            consumed_keys_.insert(trigger_key);
+        }
+
+        erase_active_key_locked(ev.key_name);
+        state.pressed = false;
+        consumed_modifiers_.erase(ev.key_name);
         return;
     }
 
-    // Create a new pending hotkey action.
-    auto pending = create_pending(ActionType::HOTKEY, press_ts,
-                                  state.down_x, state.down_y, "", 0, 0);
-    pending.press_ts = press_ts;
-    pending.release_ts = release_ts;
-    pending.required_post_ts = release_ts + POST_FRAME_OFFSET;
-    pending.last_event_ts = release_ts;
+    std::vector<std::string> modifiers = active_modifiers_locked();
+    std::vector<std::string> combo = modifiers;
+    combo.push_back(ev.key_name);
 
-    pending.raw_events.push_back(std::move(down_ev));
-    pending.raw_events.push_back(ev);
+    erase_active_key_locked(ev.key_name);
+    state.pressed = false;
 
-    // Record the full key combination (not just the released key).
-    pending.keys_pressed = std::move(combo);
-    pending.key_actions.push_back({ev.key_name, press_ts, release_ts});
+    if (consumed_keys_.erase(ev.key_name) > 0) {
+        return;
+    }
 
-    pending_.push_back(std::move(pending));
+    if (is_plain_key_noise_combo(combo)) {
+        return;
+    }
+
+    record_key_action(combo, ev.key_name, press_ts, release_ts,
+                      state.down_x, state.down_y, true);
 }
 
 // ─── Pending Action Creation ──────────────────────────────────

@@ -24,6 +24,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace cua {
@@ -218,6 +219,7 @@ private:
         bool pressed{false};
         double down_ts{0};
         int down_x{0}, down_y{0};
+        std::vector<std::string> down_modifiers;
     };
     struct KeyState {
         bool pressed{false};
@@ -285,6 +287,20 @@ private:
                                          int press_y,
                                          int release_x,
                                          int release_y);
+    std::vector<std::string> active_modifiers_locked() const;
+    std::vector<std::string> active_non_modifiers_locked() const;
+    std::vector<std::string> merge_modifier_sets_locked(
+        const std::vector<std::string>& first,
+        const std::vector<std::string>& second) const;
+    void attach_keys_to_pending_locked(PendingAction& pending,
+                                       const std::vector<std::string>& keys,
+                                       double action_release_ts,
+                                       const std::string& trigger_key = "",
+                                       double trigger_press_ts = 0.0,
+                                       double trigger_release_ts = 0.0);
+    void mark_modifiers_consumed_locked(const std::vector<std::string>& keys);
+    void erase_active_key_locked(const std::string& key_name);
+    bool has_active_key_locked(const std::string& key_name) const;
 
     MouseButtonState& get_button_state(const std::string& name);
 
@@ -292,6 +308,9 @@ private:
     // Tracks ALL currently-pressed keys (including modifiers) so we can
     // record the full combination on key release.
     std::set<std::string> active_keys_;
+    std::vector<std::string> key_order_;
+    std::unordered_set<std::string> consumed_modifiers_;
+    std::unordered_set<std::string> consumed_keys_;
 
     // Tracks when each modifier key was pressed, for debouncing.
     // Only used for modifier keys to ignore accidental taps < MODIFIER_DEBOUNCE_MS.

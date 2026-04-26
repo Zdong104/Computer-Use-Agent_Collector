@@ -27,23 +27,8 @@ namespace cua {
 
 namespace {
 
-// Returns true for modifier keys (used for Ctrl hotkey detection).
-// Note: all keys are now tracked for combination recording; this only
-// determines whether the internal Ctrl hotkey callback fires.
-bool is_modifier_key(int code) {
-    switch (code) {
-        case KEY_LEFTCTRL:
-        case KEY_RIGHTCTRL:
-        case KEY_LEFTSHIFT:
-        case KEY_RIGHTSHIFT:
-        case KEY_LEFTALT:
-        case KEY_RIGHTALT:
-        case KEY_LEFTMETA:
-        case KEY_RIGHTMETA:
-            return true;
-        default:
-            return false;
-    }
+bool is_ctrl_key(int code) {
+    return code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL;
 }
 
 // Maps evdev key codes to human-readable key names.
@@ -443,8 +428,8 @@ void InputMonitor::process_event(DeviceInfo& dev, const ::input_event& ev) {
         int code = ev.code;
         int value = ev.value;  // 0=up, 1=down, 2=repeat
 
-        // Track Ctrl state for Ctrl+Fx hotkey detection
-        if (is_modifier_key(code)) {
+        // Track Ctrl state for Ctrl+Fx collector hotkey detection.
+        if (is_ctrl_key(code)) {
             ctrl_pressed_ = (value != 0);
         }
 
