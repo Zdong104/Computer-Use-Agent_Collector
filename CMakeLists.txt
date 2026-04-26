@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(cua_capture CXX)
+if (MSVC)
+    add_compile_options(/utf-8)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
