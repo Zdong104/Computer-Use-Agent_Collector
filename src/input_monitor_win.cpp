@@ -9,7 +9,9 @@
 
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <iostream>
+#include <algorithm>
 
 namespace cua {
 
@@ -41,6 +43,29 @@ bool is_ctrl_key(DWORD vk) {
     return vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
 }
 
+bool is_modifier_name(const std::string& name) {
+    return name == "ctrl_l"  || name == "ctrl_r"  ||
+           name == "shift_l" || name == "shift_r" ||
+           name == "alt_l"   || name == "alt_r"   ||
+           name == "super_l" || name == "super_r" ||
+           name == "fn";
+}
+
+bool contains_name(const std::vector<std::string>& names,
+                   const std::string& name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+void add_name(std::vector<std::string>& names, const std::string& name) {
+    if (!contains_name(names, name)) {
+        names.push_back(name);
+    }
+}
+
+void remove_name(std::vector<std::string>& names, const std::string& name) {
+    names.erase(std::remove(names.begin(), names.end(), name), names.end());
+}
+
 int wheel_units(DWORD mouse_data) {
     const auto delta = static_cast<short>(HIWORD(mouse_data));
     if (delta == 0) return 0;
@@ -56,6 +81,29 @@ InputMonitor::InputMonitor() = default;
 
 InputMonitor::~InputMonitor() {
     stop();
+}
+
+void InputMonitor::set_capture_region(int left, int top, int width, int height,
+                                      int output_width, int output_height,
+                                      int logical_left, int logical_top) {
+    if (width <= 0 || height <= 0) {
+        region_set_ = false;
+        recorded_keys_.clear();
+        recorded_buttons_.clear();
+        return;
+    }
+
+    region_left_ = left;
+    region_top_ = top;
+    region_width_ = width;
+    region_height_ = height;
+    output_width_ = output_width > 0 ? output_width : width;
+    output_height_ = output_height > 0 ? output_height : height;
+    logical_left_ = logical_left;
+    logical_top_ = logical_top;
+    logical_width_ = output_width_;
+    logical_height_ = output_height_;
+    region_set_ = true;
 }
 
 double InputMonitor::monotonic_now() const {
@@ -152,10 +200,107 @@ std::pair<int, int> InputMonitor::get_cursor_position() {
     if (!GetCursorPos(&pt)) {
         return {0, 0};
     }
-    return {
-        static_cast<int>(pt.x) - GetSystemMetrics(SM_XVIRTUALSCREEN),
-        static_cast<int>(pt.y) - GetSystemMetrics(SM_YVIRTUALSCREEN),
-    };
+    int x = 0;
+    int y = 0;
+    translate_point(static_cast<int>(pt.x), static_cast<int>(pt.y), x, y, true);
+    return {x, y};
+}
+
+bool InputMonitor::translate_point(int screen_x, int screen_y, int& out_x, int& out_y,
+                                   bool clamp_to_region) const {
+    const int left = region_set_ ? region_left_ : GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int top = region_set_ ? region_top_ : GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int width = region_set_ ? region_width_ : GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int height = region_set_ ? region_height_ : GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    const int out_width = region_set_ ? output_width_ : width;
+    const int out_height = region_set_ ? output_height_ : height;
+    const int logical_left = region_set_ ? logical_left_ : left;
+    const int logical_top = region_set_ ? logical_top_ : top;
+    const int logical_width = region_set_ ? logical_width_ : width;
+    const int logical_height = region_set_ ? logical_height_ : height;
+
+    bool inside = screen_x >= left && screen_x < left + width &&
+                  screen_y >= top && screen_y < top + height;
+    bool logical_inside = false;
+    int mapped_x = screen_x;
+    int mapped_y = screen_y;
+    int source_left = left;
+    int source_top = top;
+    int source_width = width;
+    int source_height = height;
+
+    if (!inside && region_set_) {
+        logical_inside = screen_x >= logical_left &&
+                         screen_x < logical_left + logical_width &&
+                         screen_y >= logical_top &&
+                         screen_y < logical_top + logical_height;
+        if (logical_inside) {
+            inside = true;
+            source_left = logical_left;
+            source_top = logical_top;
+            source_width = logical_width;
+            source_height = logical_height;
+        }
+    }
+
+    if (clamp_to_region && !inside) {
+        mapped_x = std::clamp(screen_x, left, left + std::max(1, width) - 1);
+        mapped_y = std::clamp(screen_y, top, top + std::max(1, height) - 1);
+    }
+
+    out_x = static_cast<int>(
+        std::lround((mapped_x - source_left) * static_cast<double>(out_width) /
+                    static_cast<double>(std::max(1, source_width)))
+    );
+    out_y = static_cast<int>(
+        std::lround((mapped_y - source_top) * static_cast<double>(out_height) /
+                    static_cast<double>(std::max(1, source_height)))
+    );
+    return inside;
+}
+
+bool InputMonitor::should_record_key(const std::string& name, bool is_down,
+                                     int x, int y) {
+    const bool inside = !region_set_ ||
+        (x >= 0 && x < output_width_ && y >= 0 && y < output_height_);
+
+    if (is_modifier_name(name)) {
+        return true;
+    }
+
+    if (is_down) {
+        if (inside) {
+            add_name(recorded_keys_, name);
+            return true;
+        }
+        return false;
+    }
+
+    if (contains_name(recorded_keys_, name)) {
+        remove_name(recorded_keys_, name);
+        return true;
+    }
+    return inside;
+}
+
+bool InputMonitor::should_record_button(const std::string& button_name, bool is_down,
+                                        int x, int y) {
+    const bool inside = !region_set_ ||
+        (x >= 0 && x < output_width_ && y >= 0 && y < output_height_);
+
+    if (is_down) {
+        if (inside) {
+            add_name(recorded_buttons_, button_name);
+            return true;
+        }
+        return false;
+    }
+
+    if (contains_name(recorded_buttons_, button_name)) {
+        remove_name(recorded_buttons_, button_name);
+        return true;
+    }
+    return false;
 }
 
 void InputMonitor::start() {
@@ -294,7 +439,17 @@ void InputMonitor::handle_keyboard_event(WPARAM wparam, const KBDLLHOOKSTRUCT& e
     raw.timestamp_sec = monotonic_now();
     raw.key_code = static_cast<int>(vk);
     raw.key_name = name;
-    auto [cx, cy] = get_cursor_position();
+    POINT pt {};
+    if (!GetCursorPos(&pt)) {
+        pt.x = 0;
+        pt.y = 0;
+    }
+    int cx = 0;
+    int cy = 0;
+    translate_point(static_cast<int>(pt.x), static_cast<int>(pt.y), cx, cy, true);
+    if (!should_record_key(name, is_down, cx, cy)) {
+        return;
+    }
     raw.x = cx;
     raw.y = cy;
     push_event(std::move(raw));
@@ -303,47 +458,65 @@ void InputMonitor::handle_keyboard_event(WPARAM wparam, const KBDLLHOOKSTRUCT& e
 void InputMonitor::handle_mouse_event(WPARAM wparam, const MSLLHOOKSTRUCT& event) {
     RawInputEvent raw;
     raw.timestamp_sec = monotonic_now();
-    raw.x = static_cast<int>(event.pt.x) - GetSystemMetrics(SM_XVIRTUALSCREEN);
-    raw.y = static_cast<int>(event.pt.y) - GetSystemMetrics(SM_YVIRTUALSCREEN);
+    bool inside = translate_point(static_cast<int>(event.pt.x),
+                                  static_cast<int>(event.pt.y),
+                                  raw.x, raw.y, false);
 
     switch (wparam) {
         case WM_LBUTTONDOWN:
             raw.type = RawEventType::MOUSE_BTN_DOWN;
             raw.button = CUA_BTN_LEFT;
             raw.button_name = button_to_name(CUA_BTN_LEFT);
+            if (!should_record_button(raw.button_name, true, raw.x, raw.y)) return;
             break;
         case WM_LBUTTONUP:
             raw.type = RawEventType::MOUSE_BTN_UP;
             raw.button = CUA_BTN_LEFT;
             raw.button_name = button_to_name(CUA_BTN_LEFT);
+            if (!should_record_button(raw.button_name, false, raw.x, raw.y)) return;
+            if (!inside) translate_point(static_cast<int>(event.pt.x),
+                                         static_cast<int>(event.pt.y),
+                                         raw.x, raw.y, true);
             break;
         case WM_RBUTTONDOWN:
             raw.type = RawEventType::MOUSE_BTN_DOWN;
             raw.button = CUA_BTN_RIGHT;
             raw.button_name = button_to_name(CUA_BTN_RIGHT);
+            if (!should_record_button(raw.button_name, true, raw.x, raw.y)) return;
             break;
         case WM_RBUTTONUP:
             raw.type = RawEventType::MOUSE_BTN_UP;
             raw.button = CUA_BTN_RIGHT;
             raw.button_name = button_to_name(CUA_BTN_RIGHT);
+            if (!should_record_button(raw.button_name, false, raw.x, raw.y)) return;
+            if (!inside) translate_point(static_cast<int>(event.pt.x),
+                                         static_cast<int>(event.pt.y),
+                                         raw.x, raw.y, true);
             break;
         case WM_MBUTTONDOWN:
             raw.type = RawEventType::MOUSE_BTN_DOWN;
             raw.button = CUA_BTN_MIDDLE;
             raw.button_name = button_to_name(CUA_BTN_MIDDLE);
+            if (!should_record_button(raw.button_name, true, raw.x, raw.y)) return;
             break;
         case WM_MBUTTONUP:
             raw.type = RawEventType::MOUSE_BTN_UP;
             raw.button = CUA_BTN_MIDDLE;
             raw.button_name = button_to_name(CUA_BTN_MIDDLE);
+            if (!should_record_button(raw.button_name, false, raw.x, raw.y)) return;
+            if (!inside) translate_point(static_cast<int>(event.pt.x),
+                                         static_cast<int>(event.pt.y),
+                                         raw.x, raw.y, true);
             break;
         case WM_MOUSEWHEEL:
             raw.type = RawEventType::SCROLL_EVENT;
             raw.scroll_dy = wheel_units(event.mouseData);
+            if (region_set_ && !inside) return;
             break;
         case WM_MOUSEHWHEEL:
             raw.type = RawEventType::SCROLL_EVENT;
             raw.scroll_dx = wheel_units(event.mouseData);
+            if (region_set_ && !inside) return;
             break;
         default:
             return;

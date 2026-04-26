@@ -170,6 +170,9 @@ class CaptureEngine:
         self._last_click_button = ""
         self._cursor_pos = (0, 0)
         self._capture_origin = (0, 0)
+        self._capture_region: Optional[Tuple[int, int, int, int]] = None
+        self._capture_output_size: Optional[Tuple[int, int]] = None
+        self._cursor_inside_capture = True
 
     def init_portal(self, gjs_script_path: str = "") -> bool:
         try:
@@ -181,6 +184,30 @@ class CaptureEngine:
             print(f"  Failed to initialize {BACKEND_NAME} backend: {exc}")
             print("  Install Python dependencies with: pip install -r requirements.txt")
             return False
+
+    def set_capture_region(
+        self,
+        left: int,
+        top: int,
+        width: int,
+        height: int,
+        output_width: int = 0,
+        output_height: int = 0,
+        logical_left: int = 0,
+        logical_top: int = 0,
+    ):
+        if width <= 0 or height <= 0:
+            self._capture_region = None
+            self._capture_output_size = None
+            self._capture_origin = (0, 0)
+            self._cursor_inside_capture = True
+            return
+        self._capture_region = (int(left), int(top), int(width), int(height))
+        self._capture_output_size = (
+            int(output_width) if output_width > 0 else int(width),
+            int(output_height) if output_height > 0 else int(height),
+        )
+        self._capture_origin = (int(left), int(top))
 
     def start(self):
         if self._running.is_set():
@@ -310,13 +337,28 @@ class CaptureEngine:
 
         frame_interval = 1.0 / self.target_fps
         with mss.mss() as sct:
-            monitor = sct.monitors[0]
+            if self._capture_region is not None:
+                left, top, width, height = self._capture_region
+                monitor = {
+                    "left": left,
+                    "top": top,
+                    "width": width,
+                    "height": height,
+                }
+            else:
+                monitor = sct.monitors[0]
             self._capture_origin = (int(monitor.get("left", 0)), int(monitor.get("top", 0)))
             while self._running.is_set():
                 start = time.monotonic()
                 try:
                     shot = sct.grab(monitor)
                     img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+                    if (
+                        self._capture_output_size is not None
+                        and img.size != self._capture_output_size
+                    ):
+                        resampling = getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+                        img = img.resize(self._capture_output_size, resampling)
                     self._commit_frame(start, img.width, img.height, img.tobytes())
                 except Exception as exc:
                     print(f"  Screenshot capture error ({BACKEND_NAME}): {exc}")
@@ -349,15 +391,22 @@ class CaptureEngine:
         self._mouse_listener.start()
 
     def _on_move(self, x: int, y: int):
-        self._cursor_pos = self._to_capture_coords(x, y)
+        self._cursor_inside_capture = self._point_in_capture(x, y)
+        self._cursor_pos = self._to_capture_coords(
+            x, y, clamp=not self._cursor_inside_capture
+        )
 
     def _on_click(self, x: int, y: int, button, pressed: bool):
         now = time.monotonic()
         button_name = self._button_name(button)
-        x, y = self._to_capture_coords(x, y)
+        inside = self._point_in_capture(x, y)
+        x, y = self._to_capture_coords(x, y, clamp=not inside)
         self._cursor_pos = (x, y)
+        self._cursor_inside_capture = inside
 
         if pressed:
+            if not inside:
+                return
             self._active_buttons[button_name] = (
                 now,
                 x,
@@ -367,8 +416,10 @@ class CaptureEngine:
             return
 
         down_ts, down_x, down_y, down_modifiers = self._active_buttons.pop(
-            button_name, (now, x, y, [])
+            button_name, (None, x, y, [])
         )
+        if down_ts is None:
+            return
         action_modifiers = self._merge_modifier_lists(
             down_modifiers, self._active_modifiers()
         )
@@ -411,8 +462,13 @@ class CaptureEngine:
 
     def _on_scroll(self, x: int, y: int, dx: int, dy: int):
         now = time.monotonic()
+        if not self._point_in_capture(x, y):
+            self._cursor_inside_capture = False
+            self._cursor_pos = self._to_capture_coords(x, y, clamp=True)
+            return
         x, y = self._to_capture_coords(x, y)
         self._cursor_pos = (x, y)
+        self._cursor_inside_capture = True
         self._enqueue_scroll_action(now, x, y, int(dx), int(dy))
 
     def _on_key_press(self, key):
@@ -437,6 +493,8 @@ class CaptureEngine:
         if key == keyboard.Key.esc:
             self._push_hotkey(HotkeyType.DROP_ACTION)
 
+        if key_name not in self._modifier_names() and not self._cursor_inside_capture:
+            return
         self._handle_key_event(key_name, True, now)
 
     def _on_key_release(self, key):
@@ -450,6 +508,12 @@ class CaptureEngine:
         if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
             self._ctrl_pressed = False
 
+        if (
+            key_name not in self._modifier_names()
+            and key_name not in self._active_keys
+            and not self._cursor_inside_capture
+        ):
+            return
         self._handle_key_event(key_name, False, now)
 
     def _push_hotkey(self, hotkey: HotkeyType):
@@ -762,9 +826,26 @@ class CaptureEngine:
     def _is_plain_key_noise(combo: List[str]) -> bool:
         return bool(combo) and all(len(key) == 1 and key.isalnum() for key in combo)
 
-    def _to_capture_coords(self, x: int, y: int) -> Tuple[int, int]:
+    def _point_in_capture(self, x: int, y: int) -> bool:
+        if self._capture_region is None:
+            return True
+        left, top, width, height = self._capture_region
+        return left <= int(x) < left + width and top <= int(y) < top + height
+
+    def _to_capture_coords(self, x: int, y: int, clamp: bool = False) -> Tuple[int, int]:
+        if clamp and self._capture_region is not None:
+            left, top, width, height = self._capture_region
+            x = min(max(int(x), left), left + max(1, width) - 1)
+            y = min(max(int(y), top), top + max(1, height) - 1)
         left, top = self._capture_origin
-        return (int(x) - left, int(y) - top)
+        local_x = int(x) - left
+        local_y = int(y) - top
+        if self._capture_region is not None and self._capture_output_size is not None:
+            _src_left, _src_top, src_w, src_h = self._capture_region
+            out_w, out_h = self._capture_output_size
+            local_x = round(local_x * out_w / max(1, src_w))
+            local_y = round(local_y * out_h / max(1, src_h))
+        return (local_x, local_y)
 
     @staticmethod
     def _key_name(key) -> Optional[str]:

@@ -228,6 +228,10 @@ InputMonitor::~InputMonitor() {
     stop();
 }
 
+void InputMonitor::set_capture_region(int, int, int, int, int, int, int, int) {
+    // Wayland/PipeWire screen selection is handled by the portal itself.
+}
+
 double InputMonitor::monotonic_now() const {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

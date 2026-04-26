@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Stress Test — Validates the C++ capture engine under synthetic load.
+Stress Test - Validates the C++ capture engine under synthetic load.
 
 Tests:
   1. Ring buffer + action engine with 200 synthetic actions at 0.5s intervals
-  2. Verifies pre-frame timestamps are ≤ event_ts - 0.2s
-  3. Verifies post-frame timestamps are ≥ event_ts + 0.2s
+  2. Verifies pre-frame timestamps are <= event_ts - 0.2s
+  3. Verifies post-frame timestamps are >= event_ts + 0.2s
   4. Reports timing statistics
 """
 
@@ -28,7 +28,7 @@ if build_dir.exists():
 try:
     import cua_capture
 except ImportError:
-    print("❌ cua_capture module not found!")
+    print("[FAIL] cua_capture module not found!")
     print("   Build it first: cmake -S . -B build && cmake --build build -j$(nproc)")
     sys.exit(1)
 
@@ -79,11 +79,11 @@ def _assert_no_standalone_ctrl(actions):
 def test_synthetic_stress():
     """
     Test the engine with synthetic frames and clicks.
-    No PipeWire or evdev needed — uses inject_frame() and inject_mouse_click().
+    No PipeWire or evdev needed - uses inject_frame() and inject_mouse_click().
     """
     print("=" * 60)
-    print("  Stress Test — 200 Actions @ 0.5s Interval")
-    print("  Resolution: 3840 × 2400")
+    print("  Stress Test - 200 Actions @ 0.5s Interval")
+    print("  Resolution: 3840 x 2400")
     print("=" * 60)
 
     # Create engine with small resolution for speed
@@ -95,7 +95,7 @@ def test_synthetic_stress():
         max_height=H,
         target_fps=10,
     )
-    # Don't init_portal or start real capture — we'll inject frames manually
+    # Don't init_portal or start real capture - we'll inject frames manually
 
     # Start only the action engine (it will process injected events)
     engine.start()
@@ -160,7 +160,7 @@ def test_synthetic_stress():
     engine.stop()
     elapsed = time.time() - start_time
 
-    # ── Analysis ──────────────────────────────────────────────
+    # Analysis
 
     print(f"\n  Results:")
     print(f"    Actions injected:  {action_injected}")
@@ -169,7 +169,7 @@ def test_synthetic_stress():
     print(f"    Frames generated:  {total_frames}")
 
     if not completed:
-        print("\n  ❌ FAIL: No actions completed!")
+        print("\n  [FAIL] No actions completed!")
         return False
 
     # Timing analysis
@@ -182,7 +182,7 @@ def test_synthetic_stress():
     for action in completed:
         event_ts = action.event_ts
 
-        # Pre-frame check: should be ≤ event_ts - 0.2
+        # Pre-frame check: should be <= event_ts - 0.2
         if action.pre_frame_ts > 0:
             pre_delta = event_ts - action.pre_frame_ts
             pre_deltas.append(pre_delta)
@@ -192,7 +192,7 @@ def test_synthetic_stress():
         if action.pre_degraded:
             degraded += 1
 
-        # Post-frame check: should be ≥ event_ts + 0.2
+        # Post-frame check: should be >= event_ts + 0.2
         if action.post_frame_ts > 0:
             post_delta = action.post_frame_ts - event_ts
             post_deltas.append(post_delta)
@@ -205,18 +205,18 @@ def test_synthetic_stress():
         print(f"      Min:  {min(pre_deltas):.3f}s")
         print(f"      Max:  {max(pre_deltas):.3f}s")
         print(f"      Mean: {sum(pre_deltas)/len(pre_deltas):.3f}s")
-        print(f"      OK:   {pre_ok}/{len(pre_deltas)} (≥ 0.2s)")
+        print(f"      OK:   {pre_ok}/{len(pre_deltas)} (>= 0.2s)")
 
     if post_deltas:
         print(f"    Post-frame delta (post - event):")
         print(f"      Min:  {min(post_deltas):.3f}s")
         print(f"      Max:  {max(post_deltas):.3f}s")
         print(f"      Mean: {sum(post_deltas)/len(post_deltas):.3f}s")
-        print(f"      OK:   {post_ok}/{len(post_deltas)} (≥ 0.2s)")
+        print(f"      OK:   {post_ok}/{len(post_deltas)} (>= 0.2s)")
 
     print(f"    Degraded pre-frames: {degraded}/{len(completed)}")
 
-    # ── Pass/Fail ─────────────────────────────────────────────
+    # Pass/Fail
     completion_rate = len(completed) / NUM_ACTIONS
     pre_rate = pre_ok / len(completed) if completed else 0
     post_rate = post_ok / len(completed) if completed else 0
@@ -225,24 +225,24 @@ def test_synthetic_stress():
     print(f"\n  Checks:")
 
     if completion_rate >= 0.95:
-        print(f"    ✅ Completion rate: {completion_rate*100:.1f}% (≥ 95%)")
+        print(f"    [OK] Completion rate: {completion_rate*100:.1f}% (>= 95%)")
     else:
-        print(f"    ❌ Completion rate: {completion_rate*100:.1f}% (< 95%)")
+        print(f"    [FAIL] Completion rate: {completion_rate*100:.1f}% (< 95%)")
         passed = False
 
     if pre_rate >= 0.90:
-        print(f"    ✅ Pre-frame accuracy: {pre_rate*100:.1f}% (≥ 90%)")
+        print(f"    [OK] Pre-frame accuracy: {pre_rate*100:.1f}% (>= 90%)")
     else:
-        print(f"    ❌ Pre-frame accuracy: {pre_rate*100:.1f}% (< 90%)")
+        print(f"    [FAIL] Pre-frame accuracy: {pre_rate*100:.1f}% (< 90%)")
         passed = False
 
     if post_rate >= 0.90:
-        print(f"    ✅ Post-frame accuracy: {post_rate*100:.1f}% (≥ 90%)")
+        print(f"    [OK] Post-frame accuracy: {post_rate*100:.1f}% (>= 90%)")
     else:
-        print(f"    ❌ Post-frame accuracy: {post_rate*100:.1f}% (< 90%)")
+        print(f"    [FAIL] Post-frame accuracy: {post_rate*100:.1f}% (< 90%)")
         passed = False
 
-    print(f"\n  {'✅ ALL TESTS PASSED' if passed else '❌ SOME TESTS FAILED'}")
+    print(f"\n  {'[OK] ALL TESTS PASSED' if passed else '[FAIL] SOME TESTS FAILED'}")
     return passed
 
 
@@ -252,7 +252,7 @@ def test_mouse_drag_buttons():
     Verifies left, middle, and right drags survive the full Python binding path.
     """
     print("\n" + "=" * 60)
-    print("  Mouse Drag Button Test — left / middle / right")
+    print("  Mouse Drag Button Test - left / middle / right")
     print("=" * 60)
 
     W, H = 320, 240
@@ -297,7 +297,7 @@ def test_mouse_drag_buttons():
     engine.stop()
 
     if len(completed) != len(cases):
-        print(f"    ❌ Completed {len(completed)}/{len(cases)} drags")
+        print(f"    [FAIL] Completed {len(completed)}/{len(cases)} drags")
         return False
 
     completed.sort(key=lambda action: action.event_ts)
@@ -311,12 +311,12 @@ def test_mouse_drag_buttons():
         ]
         if all(checks):
             print(
-                f"    ✅ {button} drag: "
+                f"    [OK] {button} drag: "
                 f"{press[0]},{press[1]} -> {release[0]},{release[1]}"
             )
         else:
             print(
-                f"    ❌ {button} drag mismatch: "
+                f"    [FAIL] {button} drag mismatch: "
                 f"type={action.type}, button={action.button_name}, "
                 f"press=({action.press_x},{action.press_y}), "
                 f"release=({action.release_x},{action.release_y})"
@@ -353,7 +353,7 @@ def test_native_modifier_keyboard_combos():
     combos = [_keys(action) for action in completed]
     expected = [["ctrl_l", "c"], ["ctrl_l", "s"], ["super_l", "o"]]
     passed = combos == expected and _assert_no_standalone_ctrl(completed)
-    print(f"    {'✅' if passed else '❌'} combos: {combos}")
+    print(f"    {'[OK]' if passed else '[FAIL]'} combos: {combos}")
     return passed
 
 
@@ -384,7 +384,7 @@ def test_native_modifier_mouse_combos():
         and combos == [["ctrl_l"], ["ctrl_l"], ["ctrl_l"], ["ctrl_l"]]
         and _assert_no_standalone_ctrl(completed)
     )
-    print(f"    {'✅' if passed else '❌'} types={types}, keys={combos}")
+    print(f"    {'[OK]' if passed else '[FAIL]'} types={types}, keys={combos}")
     return passed
 
 
@@ -435,7 +435,24 @@ def test_python_fallback_modifier_combos():
         ["super_l", "o"],
     ]
     passed = types == expected_types and combos == expected_combos
-    print(f"    {'✅' if passed else '❌'} types={types}, keys={combos}")
+    print(f"    {'[OK]' if passed else '[FAIL]'} types={types}, keys={combos}")
+    return passed
+
+
+def test_capture_region_api():
+    print("\n" + "=" * 60)
+    print("  Capture Region API Test")
+    print("=" * 60)
+
+    native = cua_capture.CaptureEngine(10, 320, 240, 10)
+    fallback = cross_platform_capture.CaptureEngine(buffer_capacity=10)
+    passed = hasattr(native, "set_capture_region") and hasattr(
+        fallback, "set_capture_region"
+    )
+    if passed:
+        native.set_capture_region(100, 200, 320, 240)
+        fallback.set_capture_region(100, 200, 320, 240)
+    print(f"    {'[OK]' if passed else '[FAIL]'} native/fallback region setters")
     return passed
 
 
@@ -445,4 +462,5 @@ if __name__ == '__main__':
     success = test_native_modifier_keyboard_combos() and success
     success = test_native_modifier_mouse_combos() and success
     success = test_python_fallback_modifier_combos() and success
+    success = test_capture_region_api() and success
     sys.exit(0 if success else 1)

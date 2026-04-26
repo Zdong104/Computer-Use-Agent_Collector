@@ -71,6 +71,28 @@ public:
     }
 
     /**
+     * Set the monitor/region to capture. Coordinates are absolute desktop
+     * pixels; recorded actions are translated into this region's local space.
+     */
+    void set_capture_region(int left, int top, int width, int height,
+                            int output_width = 0, int output_height = 0,
+                            int logical_left = 0, int logical_top = 0) {
+        const bool has_logical_region = output_width > 0 && output_height > 0;
+        const int capture_left = has_logical_region ? logical_left : left;
+        const int capture_top = has_logical_region ? logical_top : top;
+        const int capture_width = has_logical_region ? output_width : width;
+        const int capture_height = has_logical_region ? output_height : height;
+
+        capture_.set_capture_region(capture_left, capture_top,
+                                    capture_width, capture_height,
+                                    output_width, output_height,
+                                    logical_left, logical_top);
+        input_.set_capture_region(left, top, width, height,
+                                  output_width, output_height,
+                                  logical_left, logical_top);
+    }
+
+    /**
      * Start all threads (capture, input, action worker).
      */
     void start() {
@@ -325,6 +347,11 @@ PYBIND11_MODULE(cua_capture, m) {
         .def("init_portal", &cua::CaptureEngine::init_portal,
              py::arg("gjs_script_path") = "",
              "Initialize platform screen capture")
+        .def("set_capture_region", &cua::CaptureEngine::set_capture_region,
+             py::arg("left"), py::arg("top"), py::arg("width"), py::arg("height"),
+             py::arg("output_width") = 0, py::arg("output_height") = 0,
+             py::arg("logical_left") = 0, py::arg("logical_top") = 0,
+             "Set selected monitor capture rectangle in absolute desktop pixels")
         .def("start", &cua::CaptureEngine::start,
              "Start all capture/input/action threads")
         .def("stop", &cua::CaptureEngine::stop,

@@ -92,6 +92,14 @@ public:
     void set_hotkey_callback(HotkeyCallback cb) { hotkey_cb_ = std::move(cb); }
 
     /**
+     * Limit recorded input coordinates to a selected capture region.
+     * Collector hotkeys remain global; recorded actions use region-local coords.
+     */
+    void set_capture_region(int left, int top, int width, int height,
+                            int output_width = 0, int output_height = 0,
+                            int logical_left = 0, int logical_top = 0);
+
+    /**
      * Start monitoring. Scans for input devices and begins the monitor thread.
      */
     void start();
@@ -142,12 +150,30 @@ private:
     HHOOK mouse_hook_{nullptr};
     std::atomic<DWORD> hook_thread_id_{0};
     bool ctrl_pressed_{false};
+    bool region_set_{false};
+    int region_left_{0};
+    int region_top_{0};
+    int region_width_{0};
+    int region_height_{0};
+    int output_width_{0};
+    int output_height_{0};
+    int logical_left_{0};
+    int logical_top_{0};
+    int logical_width_{0};
+    int logical_height_{0};
+    std::vector<std::string> recorded_keys_;
+    std::vector<std::string> recorded_buttons_;
 
     static InputMonitor* active_instance_;
     static LRESULT CALLBACK keyboard_proc(int code, WPARAM wparam, LPARAM lparam);
     static LRESULT CALLBACK mouse_proc(int code, WPARAM wparam, LPARAM lparam);
     void handle_keyboard_event(WPARAM wparam, const KBDLLHOOKSTRUCT& event);
     void handle_mouse_event(WPARAM wparam, const MSLLHOOKSTRUCT& event);
+    bool translate_point(int screen_x, int screen_y, int& out_x, int& out_y,
+                         bool clamp_to_region = false) const;
+    bool should_record_key(const std::string& name, bool is_down, int x, int y);
+    bool should_record_button(const std::string& button_name, bool is_down,
+                              int x, int y);
 #else
     struct DeviceInfo {
         int fd;

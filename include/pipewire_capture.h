@@ -31,6 +31,9 @@ public:
     PipeWireCapture& operator=(const PipeWireCapture&) = delete;
 
     bool init_portal(const std::string& gjs_script_path = "");
+    void set_capture_region(int left, int top, int width, int height,
+                            int output_width = 0, int output_height = 0,
+                            int logical_left = 0, int logical_top = 0);
     void start();
     void stop();
 
@@ -48,8 +51,11 @@ private:
     std::thread capture_thread_;
     std::atomic<bool> running_{false};
     bool initialized_{false};
-    int virtual_left_{0};
-    int virtual_top_{0};
+    bool region_set_{false};
+    int source_left_{0};
+    int source_top_{0};
+    int source_width_{0};
+    int source_height_{0};
     int capture_width_{0};
     int capture_height_{0};
     double last_frame_ts_{0.0};
@@ -104,6 +110,9 @@ public:
      * @return true if portal session established successfully
      */
     bool init_portal(const std::string& gjs_script_path = "");
+    void set_capture_region(int left, int top, int width, int height,
+                            int output_width = 0, int output_height = 0,
+                            int logical_left = 0, int logical_top = 0);
 
     /**
      * Start the capture thread. Frames begin flowing into the ring buffer.

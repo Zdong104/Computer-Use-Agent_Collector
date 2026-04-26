@@ -43,6 +43,13 @@ from concurrent.futures import ThreadPoolExecutor
 from PIL import Image as PILImage
 import io
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        try:
+            _stream.reconfigure(errors='replace')
+        except Exception:
+            pass
+
 # Add build dir to path for native cua_capture module
 build_dir = Path(__file__).parent / 'build'
 if build_dir.exists():
@@ -120,6 +127,29 @@ class TaskRecord:
     session_type: str
     screen_resolution: Tuple[int, int]
     actions: List[dict] = field(default_factory=list)
+
+
+@dataclass
+class ScreenRegion:
+    index: int
+    name: str
+    left: int
+    top: int
+    width: int
+    height: int
+    physical_left: int
+    physical_top: int
+    physical_width: int
+    physical_height: int
+    primary: bool = False
+
+    @property
+    def right(self) -> int:
+        return self.left + self.width
+
+    @property
+    def bottom(self) -> int:
+        return self.top + self.height
 
 
 # ============================================================
@@ -379,6 +409,246 @@ OS_NAME, SESSION_TYPE = detect_platform()
 
 
 # ============================================================
+# Screen Selection
+# ============================================================
+
+def enumerate_windows_screens() -> List[ScreenRegion]:
+    if OS_NAME != 'windows':
+        return []
+
+    import ctypes
+    import re
+    from ctypes import wintypes
+
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ('left', wintypes.LONG),
+            ('top', wintypes.LONG),
+            ('right', wintypes.LONG),
+            ('bottom', wintypes.LONG),
+        ]
+
+    class MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [
+            ('cbSize', wintypes.DWORD),
+            ('rcMonitor', RECT),
+            ('rcWork', RECT),
+            ('dwFlags', wintypes.DWORD),
+            ('szDevice', wintypes.WCHAR * 32),
+        ]
+
+    monitors = []
+    get_dpi_for_monitor = None
+    try:
+        shcore = ctypes.windll.shcore
+        get_dpi_for_monitor = shcore.GetDpiForMonitor
+        get_dpi_for_monitor.argtypes = [
+            wintypes.HMONITOR,
+            ctypes.c_int,
+            ctypes.POINTER(wintypes.UINT),
+            ctypes.POINTER(wintypes.UINT),
+        ]
+    except Exception:
+        get_dpi_for_monitor = None
+
+    monitor_enum_proc = ctypes.WINFUNCTYPE(
+        wintypes.BOOL,
+        wintypes.HMONITOR,
+        wintypes.HDC,
+        ctypes.POINTER(RECT),
+        wintypes.LPARAM,
+    )
+
+    def callback(hmonitor, _hdc, _rect, _data):
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+        if ctypes.windll.user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+            rect = info.rcMonitor
+            dpi_x = wintypes.UINT(96)
+            dpi_y = wintypes.UINT(96)
+            if get_dpi_for_monitor is not None:
+                try:
+                    # MDT_EFFECTIVE_DPI gives the desktop coordinate scale.
+                    get_dpi_for_monitor(hmonitor, 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
+                except Exception:
+                    dpi_x = wintypes.UINT(96)
+                    dpi_y = wintypes.UINT(96)
+            physical_width = int(rect.right - rect.left)
+            physical_height = int(rect.bottom - rect.top)
+            logical_width = max(1, round(physical_width * 96 / max(1, int(dpi_x.value))))
+            logical_height = max(1, round(physical_height * 96 / max(1, int(dpi_y.value))))
+            match = re.search(r'DISPLAY(\d+)$', info.szDevice, re.IGNORECASE)
+            display_index = int(match.group(1)) if match else len(monitors) + 1
+            monitors.append({
+                'index': display_index,
+                'name': info.szDevice,
+                'left': round(int(rect.left) * 96 / max(1, int(dpi_x.value))),
+                'top': round(int(rect.top) * 96 / max(1, int(dpi_y.value))),
+                'width': logical_width,
+                'height': logical_height,
+                'physical_left': int(rect.left),
+                'physical_top': int(rect.top),
+                'physical_width': physical_width,
+                'physical_height': physical_height,
+                'primary': bool(info.dwFlags & 1),
+            })
+        return True
+
+    ctypes.windll.user32.EnumDisplayMonitors(
+        None, None, monitor_enum_proc(callback), 0
+    )
+
+    monitors.sort(key=lambda item: item['index'])
+    return [
+        ScreenRegion(**monitor)
+        for monitor in monitors
+    ]
+
+
+def choose_capture_screen_gui(monitors: List[ScreenRegion]) -> Optional[ScreenRegion]:
+    try:
+        import tkinter as tk
+    except Exception:
+        return None
+
+    selected: List[Optional[ScreenRegion]] = [None]
+    root = tk.Tk()
+    root.title("Select Screen")
+    root.attributes('-topmost', True)
+    root.resizable(False, False)
+
+    default = next((m for m in monitors if m.primary), monitors[0])
+
+    tk.Label(
+        root,
+        text="Select screen to record",
+        font=("Segoe UI", 16, "bold"),
+        padx=24,
+        pady=12,
+    ).pack(fill='x')
+    tk.Label(
+        root,
+        text="Actions and screenshots will use the selected screen's local coordinates.",
+        font=("Segoe UI", 10),
+        fg="#555",
+        padx=24,
+    ).pack(fill='x')
+
+    body = tk.Frame(root, padx=20, pady=16)
+    body.pack(fill='both')
+
+    def pick(monitor: ScreenRegion):
+        selected[0] = monitor
+        root.destroy()
+
+    for monitor in monitors:
+        primary = " primary" if monitor.primary else ""
+        text = (
+            f"Display {monitor.index}{primary}\n"
+            f"{monitor.name}  {monitor.width}x{monitor.height}\n"
+            f"Desktop position ({monitor.left},{monitor.top})"
+        )
+        button = tk.Button(
+            body,
+            text=text,
+            justify='left',
+            anchor='w',
+            width=42,
+            padx=12,
+            pady=8,
+            command=lambda m=monitor: pick(m),
+        )
+        button.pack(fill='x', pady=4)
+        if monitor.index == default.index:
+            button.focus_set()
+
+    def use_default(_event=None):
+        pick(default)
+        return 'break'
+
+    root.bind('<Return>', use_default)
+    root.bind('<Escape>', use_default)
+    root.update_idletasks()
+    w = root.winfo_width()
+    h = root.winfo_height()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+    root.mainloop()
+    return selected[0]
+
+
+def choose_capture_screen(screen_index: Optional[int] = None) -> Optional[ScreenRegion]:
+    if OS_NAME != 'windows':
+        return None
+
+    monitors = enumerate_windows_screens()
+    if not monitors:
+        print("  [WARN] Could not enumerate Windows monitors; falling back to virtual desktop capture.")
+        return None
+
+    env_index = os.environ.get('CUA_CAPTURE_MONITOR', '').strip()
+    if screen_index is None and env_index:
+        try:
+            screen_index = int(env_index)
+        except ValueError:
+            print(f"  [WARN] Ignoring invalid CUA_CAPTURE_MONITOR={env_index!r}")
+
+    def find_monitor(index: Optional[int]) -> Optional[ScreenRegion]:
+        if index is None:
+            return None
+        for monitor in monitors:
+            if monitor.index == index:
+                return monitor
+        return None
+
+    selected = find_monitor(screen_index)
+    if selected is None and screen_index is not None:
+        print(f"  [WARN] Screen #{screen_index} was not found; please choose from the list.")
+
+    if selected is None and len(monitors) == 1:
+        selected = monitors[0]
+
+    if selected is None:
+        if os.environ.get('CUA_CAPTURE_PROMPT', '').strip().lower() != 'console':
+            selected = choose_capture_screen_gui(monitors)
+
+    if selected is None:
+        print("\nSelect screen to record:")
+        for monitor in monitors:
+            primary = " primary" if monitor.primary else ""
+            print(
+                f"  [{monitor.index}] {monitor.name}{primary}: "
+                f"{monitor.width}x{monitor.height} at "
+                f"({monitor.left},{monitor.top})"
+            )
+
+        default = next((m for m in monitors if m.primary), monitors[0])
+        if sys.stdin.isatty():
+            choice = input(f"Screen number [{default.index}]: ").strip()
+            if choice:
+                selected = find_monitor(int(choice)) if choice.isdigit() else None
+                if selected is None:
+                    print(f"  [WARN] Invalid screen {choice!r}; using primary screen.")
+            if selected is None:
+                selected = default
+        else:
+            print(f"  Non-interactive terminal; using primary screen #{default.index}.")
+            selected = default
+
+    print(
+        f"  Recording screen #{selected.index}: {selected.name} "
+        f"{selected.width}x{selected.height} at ({selected.left},{selected.top})"
+    )
+    return selected
+
+
+# ============================================================
 # V2 Collector
 # ============================================================
 
@@ -396,13 +666,22 @@ class CollectorV2:
                  buffer_capacity: int = 10,
                  max_width: int = 3840,
                  max_height: int = 2400,
-                 target_fps: int = 10):
+                 target_fps: int = 10,
+                 screen_index: Optional[int] = None):
         self.state = 'IDLE'
         self.data_store = DataStore(data_dir)
         self.overlay = StatusOverlay()
+        self.capture_screen = choose_capture_screen(screen_index)
+
+        if self.capture_screen is not None:
+            max_width = max(max_width, self.capture_screen.width)
+            max_height = max(max_height, self.capture_screen.height)
 
         # Resolution (will be updated from actual frames)
-        self.resolution = (max_width, max_height)
+        if self.capture_screen is not None:
+            self.resolution = (self.capture_screen.width, self.capture_screen.height)
+        else:
+            self.resolution = (max_width, max_height)
 
         # C++ capture engine
         self.engine = cua_capture.CaptureEngine(
@@ -411,6 +690,17 @@ class CollectorV2:
             max_height=max_height,
             target_fps=target_fps,
         )
+        if self.capture_screen is not None and hasattr(self.engine, 'set_capture_region'):
+            self.engine.set_capture_region(
+                self.capture_screen.physical_left,
+                self.capture_screen.physical_top,
+                self.capture_screen.physical_width,
+                self.capture_screen.physical_height,
+                self.capture_screen.width,
+                self.capture_screen.height,
+                self.capture_screen.left,
+                self.capture_screen.top,
+            )
 
         # Task state
         self.current_task: Optional[TaskRecord] = None
@@ -444,13 +734,21 @@ class CollectorV2:
         return round((end_ts - start_ts) * 1000.0, 3)
 
     def run(self):
+        screen_line = ""
+        if self.capture_screen is not None:
+            screen_line = (
+                f"  Capture Screen: #{self.capture_screen.index} "
+                f"{self.capture_screen.width}x{self.capture_screen.height} "
+                f"@ ({self.capture_screen.left},{self.capture_screen.top})\n"
+            )
         hdr = (
             f"\n{'='*60}\n"
             f"  CUA_Collector V2 – Automated UI Action Data Collector\n"
             f"{'='*60}\n"
             f"  OS: {OS_NAME}  |  Session: {SESSION_TYPE}\n"
             f"  Backend: {CAPTURE_BACKEND_NAME}\n"
-            f"  Max Resolution: {self.resolution[0]}×{self.resolution[1]}\n"
+            f"{screen_line}"
+            f"  Target Resolution: {self.resolution[0]}x{self.resolution[1]}\n"
             f"  Data dir: {self.data_store.base_dir.resolve()}\n\n"
             f"  Hotkeys:\n"
             f"    Ctrl+F8   → Start new task\n"
@@ -765,6 +1063,12 @@ def main():
     parser.add_argument('--max-width', type=int, default=3840, help='Max frame width')
     parser.add_argument('--max-height', type=int, default=2400, help='Max frame height')
     parser.add_argument('--fps', type=int, default=10, help='Target capture FPS')
+    parser.add_argument(
+        '--screen-index',
+        type=int,
+        default=None,
+        help='1-based Windows screen index to capture (left-to-right order)',
+    )
     args = parser.parse_args()
 
     collector = CollectorV2(
@@ -773,6 +1077,7 @@ def main():
         max_width=args.max_width,
         max_height=args.max_height,
         target_fps=args.fps,
+        screen_index=args.screen_index,
     )
     collector.run()
 

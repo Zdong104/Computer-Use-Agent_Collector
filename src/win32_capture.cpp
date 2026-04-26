@@ -47,33 +47,61 @@ void PipeWireCapture::log_status(const std::string& msg) {
     }
 }
 
+void PipeWireCapture::set_capture_region(int left, int top, int width, int height,
+                                         int output_width, int output_height,
+                                         int, int) {
+    if (width <= 0 || height <= 0) {
+        region_set_ = false;
+        source_width_ = 0;
+        source_height_ = 0;
+        return;
+    }
+
+    source_left_ = left;
+    source_top_ = top;
+    source_width_ = width;
+    source_height_ = height;
+    capture_width_ = output_width > 0 ? output_width : width;
+    capture_height_ = output_height > 0 ? output_height : height;
+    region_set_ = true;
+}
+
 bool PipeWireCapture::init_portal(const std::string&) {
     SetProcessDPIAware();
 
-    virtual_left_ = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    virtual_top_ = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const int virtual_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    const int virtual_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (!region_set_) {
+        source_left_ = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        source_top_ = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        source_width_ = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        source_height_ = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        capture_width_ = source_width_;
+        capture_height_ = source_height_;
+    }
 
-    capture_width_ = std::min(virtual_width, buffer_.max_width());
-    capture_height_ = std::min(virtual_height, buffer_.max_height());
+    capture_width_ = std::min(capture_width_, buffer_.max_width());
+    capture_height_ = std::min(capture_height_, buffer_.max_height());
 
     if (capture_width_ <= 0 || capture_height_ <= 0) {
-        log_status("Unable to detect a usable virtual desktop size");
+        log_status("Unable to detect a usable capture size");
         initialized_ = false;
         return false;
     }
 
-    if (capture_width_ != virtual_width || capture_height_ != virtual_height) {
+    if (capture_width_ != source_width_ || capture_height_ != source_height_) {
         log_status(
-            "Virtual desktop exceeds max frame size; capturing " +
+            "Capture region ready: source " +
+            std::to_string(source_width_) + "x" +
+            std::to_string(source_height_) + " at " +
+            std::to_string(source_left_) + "," + std::to_string(source_top_) +
+            " -> recording " +
             std::to_string(capture_width_) + "x" +
-            std::to_string(capture_height_) + " from the virtual origin"
+            std::to_string(capture_height_)
         );
     } else {
         log_status(
-            "Virtual desktop ready: " + std::to_string(capture_width_) + "x" +
-            std::to_string(capture_height_)
+            "Capture region ready: " + std::to_string(capture_width_) + "x" +
+            std::to_string(capture_height_) + " at " +
+            std::to_string(source_left_) + "," + std::to_string(source_top_)
         );
     }
 
@@ -152,15 +180,19 @@ bool PipeWireCapture::capture_frame() {
     }
 
     HGDIOBJ old = SelectObject(memory_dc, bitmap);
-    const BOOL ok = BitBlt(
+    SetStretchBltMode(memory_dc, HALFTONE);
+    SetBrushOrgEx(memory_dc, 0, 0, nullptr);
+    const BOOL ok = StretchBlt(
         memory_dc,
         0,
         0,
         capture_width_,
         capture_height_,
         screen_dc,
-        virtual_left_,
-        virtual_top_,
+        source_left_,
+        source_top_,
+        source_width_,
+        source_height_,
         SRCCOPY | CAPTUREBLT
     );
 

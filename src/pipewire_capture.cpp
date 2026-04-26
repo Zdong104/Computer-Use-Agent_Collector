@@ -106,6 +106,10 @@ bool PipeWireCapture::init_portal(const std::string& gjs_script_path) {
     return spawn_gjs_helper(gjs_script_path);
 }
 
+void PipeWireCapture::set_capture_region(int, int, int, int, int, int, int, int) {
+    // Wayland monitor selection is delegated to the XDG portal dialog.
+}
+
 void PipeWireCapture::start() {
     if (running_.load()) return;
     if (pw_fd_ < 0 || pw_node_id_ < 0) {
