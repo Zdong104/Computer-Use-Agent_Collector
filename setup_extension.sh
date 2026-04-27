@@ -27,8 +27,8 @@ cat > "$EXT_DIR/metadata.json" << 'EOF'
   "uuid": "cursor-tracker@cua",
   "name": "CUA Cursor Tracker",
   "description": "Exposes cursor position over D-Bus for CUA Collector",
-  "shell-version": ["45", "46", "47", "48", "49"],
-  "version": 2
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version": 3
 }
 EOF
 
@@ -155,12 +155,28 @@ else
     echo "✅ Added to enabled-extensions"
 fi
 
+# GNOME Shell can keep old extension metadata cached in the running session.
+# If the extension is reported as OUT OF DATE even after writing metadata.json,
+# briefly disable version validation to force GNOME to re-read the extension,
+# then restore the normal validation setting.
+if command -v gnome-extensions >/dev/null 2>&1; then
+    gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
+    EXT_INFO="$(gnome-extensions info "$EXT_UUID" 2>/dev/null || true)"
+    if echo "$EXT_INFO" | grep -q "State: OUT OF DATE"; then
+        echo "⚠️  GNOME still has old extension metadata cached; refreshing live session..."
+        OLD_VALIDATION="$(gsettings get org.gnome.shell disable-extension-version-validation 2>/dev/null || echo false)"
+        gsettings set org.gnome.shell disable-extension-version-validation true 2>/dev/null || true
+        gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
+        gsettings set org.gnome.shell disable-extension-version-validation "$OLD_VALIDATION" 2>/dev/null || true
+    fi
+fi
+
 echo ""
-echo "⚠️  Log out and log back in for the extension to load."
-echo ""
-echo "   Verify after re-login:"
+echo "   Verify cursor tracking:"
 echo "     gdbus call --session \\"
 echo "       --dest org.cua.CursorTracker \\"
 echo "       --object-path /org/cua/CursorTracker \\"
-echo "       --method org.cua.CursorTracker.GetPosition"
+echo "       --method org.cua.CursorTracker.GetPositionPixel"
+echo ""
+echo "   If verification fails, log out and log back in once."
 echo ""

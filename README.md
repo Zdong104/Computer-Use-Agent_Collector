@@ -44,7 +44,7 @@ for example:
 ```
 
 ### Ubuntu Wayland / GNOME
-
+**Update: Support Ubuntu 26.04 (GNOME 50) now**
 ```bash
 git clone https://github.com/Zdong104/CUA_Collector.git
 cd CUA_Collector
@@ -74,7 +74,7 @@ This path uses the native V2 backend: PipeWire for screenshots and libevdev for
 input events.
 
 ### Linux Xorg / X11
-
+Since Xorg is depreciated from Ubuntu in future versions, support will be removed in future and now only support Single Screen Usage, More than ONE screen could cause issue.
 ```bash
 git clone https://github.com/Zdong104/CUA_Collector.git
 cd CUA_Collector
