@@ -231,11 +231,15 @@ class StatusOverlay:
         self._label = None
         self._thread = None
         self._running = False
+        self._enabled = True
         self._pending_state = 'IDLE'
         self._pending_text = None
         self._dialog = None
 
     def start(self):
+        if OS_NAME == 'macos':
+            self._enabled = False
+            return
         self._running = True
         self._thread = threading.Thread(target=self._run_tk, daemon=True)
         self._thread.start()
@@ -285,6 +289,8 @@ class StatusOverlay:
             self._root.after(80, self._poll)
 
     def update_state(self, state: str, extra: str = ''):
+        if not self._enabled:
+            return
         label = self.LABELS.get(state, state)
         if extra:
             label = f"{label} | {extra}"
@@ -295,6 +301,11 @@ class StatusOverlay:
         self._running = False
 
     def ask_description(self) -> Optional[str]:
+        if not self._enabled:
+            try:
+                return input("Task description: ").strip()
+            except EOFError:
+                return None
         self._dialog_result = None
         self._dialog_done = threading.Event()
 
@@ -511,6 +522,8 @@ def enumerate_windows_screens() -> List[ScreenRegion]:
 
 
 def choose_capture_screen_gui(monitors: List[ScreenRegion]) -> Optional[ScreenRegion]:
+    if OS_NAME == 'macos':
+        return None
     try:
         import tkinter as tk
     except Exception:

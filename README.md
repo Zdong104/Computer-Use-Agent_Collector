@@ -139,6 +139,14 @@ pip install -r requirements.txt
 ./run_mac.sh
 ```
 
+Use a Python installation with Tk support. Some Homebrew Python builds on Apple
+silicon do not bundle `tkinter` by default. If `import tkinter` fails, install
+the matching Homebrew Tk package for your Python version. For example:
+
+```bash
+brew install python-tk@3.14
+```
+
 Grant Screen Recording and Accessibility permissions to the terminal app or
 Python executable in System Settings. Restart the launcher after changing those
 permissions.
