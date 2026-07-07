@@ -148,6 +148,12 @@ public:
     /// Latest frame timestamp
     double latest_frame_ts() const { return buffer_.latest_timestamp(); }
 
+    /// Capture instrumentation: (real frames from source, synthetic keepalive
+    /// re-emits). Lets Python measure the effective frame supply vs. actions.
+    std::pair<uint64_t, uint64_t> capture_stats() const {
+        return {capture_.frames_captured(), capture_.frames_keepalive()};
+    }
+
     /// Is capture running?
     bool is_running() const { return capture_.is_running(); }
 
@@ -376,6 +382,9 @@ PYBIND11_MODULE(cua_capture, m) {
              &cua::CaptureEngine::latest_frame_ts)
         .def_property_readonly("is_running",
              &cua::CaptureEngine::is_running)
+        .def("capture_stats",
+             &cua::CaptureEngine::capture_stats,
+             "Return (frames_captured, frames_keepalive) counters.")
         .def_property_readonly("portal_position_x",
              &cua::CaptureEngine::portal_position_x)
         .def_property_readonly("portal_position_y",

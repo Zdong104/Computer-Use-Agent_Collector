@@ -102,6 +102,14 @@ public:
     double latest_timestamp() const;
 
     /**
+     * Copy the latest committed frame (highest timestamp) into out.
+     * Used as a fallback when no true post-frame is available.
+     * @return true if any valid frame exists.
+     * LOCK-FREE.
+     */
+    bool get_latest_frame(FrameSlot& out) const;
+
+    /**
      * Get total number of frames written since construction.
      */
     uint64_t total_frames_written() const;

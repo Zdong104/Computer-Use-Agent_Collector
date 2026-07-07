@@ -41,6 +41,12 @@ public:
     int node_id() const { return -1; }
     int pw_fd() const { return -1; }
 
+    // Instrumentation (Win32 backend does not use a keepalive timer; the GDI
+    // capture loop produces frames unconditionally at target_fps, so all frames
+    // are "captured" and none are synthetic).
+    uint64_t frames_captured() const { return frames_captured_.load(); }
+    uint64_t frames_keepalive() const { return 0; }
+
     // Portal-reported geometry of the selected monitor (stub: unknown = -1).
     int portal_position_x() const { return -1; }
     int portal_position_y() const { return -1; }
@@ -65,6 +71,7 @@ private:
     int capture_width_{0};
     int capture_height_{0};
     double last_frame_ts_{0.0};
+    std::atomic<uint64_t> frames_captured_{0};
     StatusCallback status_cb_;
 
     void log_status(const std::string& msg);
@@ -90,6 +97,7 @@ private:
 #include <functional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace cua {
 
@@ -133,6 +141,11 @@ public:
 
     /// @return true if capture is actively running
     bool is_running() const { return running_.load(); }
+
+    /// @return number of real frames received from the compositor
+    uint64_t frames_captured() const { return frames_captured_.load(); }
+    /// @return number of synthetic keepalive frames re-emitted
+    uint64_t frames_keepalive() const { return frames_keepalive_.load(); }
 
     /// @return PipeWire node ID (after init_portal)
     int node_id() const { return pw_node_id_; }
@@ -192,9 +205,28 @@ private:
     std::atomic<bool> running_{false};
     double last_frame_ts_{0.0};
 
+    // Keepalive: re-emits the last captured frame when the compositor stops
+    // delivering buffers (e.g. static screen), so post-frame lookups always
+    // have a recent frame to resolve against. Runs on the PipeWire loop thread.
+    ::spa_source* keepalive_timer_{nullptr};
+    // Last converted RGB frame, reused by the keepalive timer. Only touched on
+    // the PipeWire loop thread (on_process + timer callback), so no lock needed.
+    std::vector<uint8_t> last_rgb_;
+    int last_frame_w_{0};
+    int last_frame_h_{0};
+
+    // Instrumentation counters (atomic; read from Python via get_stats()).
+    std::atomic<uint64_t> frames_captured_{0};   // real frames from compositor
+    std::atomic<uint64_t> frames_keepalive_{0};  // synthetic keepalive re-emits
+
     StatusCallback status_cb_;
 
     void log_status(const std::string& msg);
+
+    // Keepalive timer callback (PipeWire loop thread).
+    static void on_keepalive(void* userdata, uint64_t expirations);
+    // Commit last_rgb_ into the ring buffer with the given timestamp.
+    void emit_frame_locked(double ts);
 
     // GJS helper management
     bool spawn_gjs_helper(const std::string& script_path);

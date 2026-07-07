@@ -377,7 +377,36 @@ void PipeWireCapture::capture_loop() {
     }
 
     log_status("Capture stream connected");
+
+    // Arm the keepalive timer on the PipeWire loop. It fires every frame
+    // interval and re-emits the last frame whenever the compositor has stopped
+    // delivering buffers (static screen), guaranteeing post-frame availability.
+    struct pw_loop* pw_loop = pw_main_loop_get_loop(loop_);
+    keepalive_timer_ = pw_loop_add_timer(pw_loop, &PipeWireCapture::on_keepalive, this);
+    if (keepalive_timer_) {
+        // Convert min_frame_interval_ (seconds) into timespec value/interval.
+        auto to_timespec = [](double sec) {
+            struct timespec ts;
+            ts.tv_sec = static_cast<time_t>(sec);
+            ts.tv_nsec = static_cast<long>((sec - static_cast<double>(ts.tv_sec)) * 1e9);
+            return ts;
+        };
+        struct timespec value = to_timespec(min_frame_interval_);
+        struct timespec interval = to_timespec(min_frame_interval_);
+        // absolute=false → value is relative to now; interval makes it periodic.
+        pw_loop_update_timer(pw_loop, keepalive_timer_, &value, &interval, false);
+    } else {
+        log_status("Warning: failed to create keepalive timer; "
+                   "static-screen frames may time out");
+    }
+
     pw_main_loop_run(loop_);
+
+    // Loop has exited; disarm and destroy the timer before the loop is torn down.
+    if (keepalive_timer_) {
+        pw_loop_destroy_source(pw_main_loop_get_loop(loop_), keepalive_timer_);
+        keepalive_timer_ = nullptr;
+    }
 }
 
 void PipeWireCapture::on_state_changed(void* userdata,
@@ -589,11 +618,53 @@ void PipeWireCapture::on_process(void* userdata) {
     }
     self->buffer_.commit_write();
     self->last_frame_ts_ = now;
+    self->frames_captured_.fetch_add(1, std::memory_order_relaxed);
+
+    // Keep a copy of the converted frame so the keepalive timer can re-emit it
+    // when the compositor stops delivering buffers (static screen). Both this
+    // path and the timer run on the PipeWire loop thread, so no lock is needed.
+    const size_t rgb_size = static_cast<size_t>(width) * height * 3;
+    if (self->last_rgb_.size() != rgb_size) {
+        self->last_rgb_.resize(rgb_size);
+    }
+    std::memcpy(self->last_rgb_.data(), dst, rgb_size);
+    self->last_frame_w_ = width;
+    self->last_frame_h_ = height;
 
     if (mapped) {
         munmap(mapped, data.maxsize);
     }
     pw_stream_queue_buffer(self->stream_, buffer);
+}
+
+void PipeWireCapture::emit_frame_locked(double ts) {
+    // Re-commit the last captured frame into the ring buffer with a fresh
+    // timestamp. Caller guarantees last_rgb_ holds a valid frame.
+    const size_t rgb_size = static_cast<size_t>(last_frame_w_) * last_frame_h_ * 3;
+    if (rgb_size == 0 || last_rgb_.size() < rgb_size) return;
+
+    FrameSlot& slot = buffer_.begin_write();
+    slot.timestamp_sec = ts;
+    slot.width = last_frame_w_;
+    slot.height = last_frame_h_;
+    std::memcpy(slot.rgb_data.data(), last_rgb_.data(), rgb_size);
+    buffer_.commit_write();
+    last_frame_ts_ = ts;
+}
+
+void PipeWireCapture::on_keepalive(void* userdata, uint64_t /*expirations*/) {
+    auto* self = static_cast<PipeWireCapture*>(userdata);
+    if (!self || !self->running_.load()) return;
+
+    // Only re-emit if the compositor has gone quiet for at least one frame
+    // interval. When frames are flowing normally, on_process keeps last_frame_ts_
+    // fresh and this is a no-op.
+    if (self->last_frame_w_ <= 0 || self->last_frame_h_ <= 0) return;  // no frame yet
+    const double now = monotonic_now_sec();
+    if (now - self->last_frame_ts_ < self->min_frame_interval_) return;
+
+    self->emit_frame_locked(now);
+    self->frames_keepalive_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void PipeWireCapture::handle_frame() {

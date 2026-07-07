@@ -666,15 +666,7 @@ void ActionEngine::check_pending_completions() {
     auto it = pending_.begin();
 
     while (it != pending_.end()) {
-        // Check for timeout
-        if (now - it->creation_ts > POST_FRAME_TIMEOUT) {
-            std::cerr << "[ActionEngine] Action " << it->action_id
-                      << " timed out waiting for post-frame" << std::endl;
-            it = pending_.erase(it);
-            continue;
-        }
-
-        // Try to find post-frame
+        // Try to find a true post-frame (timestamp >= required_post_ts).
         FrameSlot post_frame;
         if (buffer_.find_post_frame(it->required_post_ts, post_frame)) {
             // Pass FrameSlot by value so finalize_action can move rgb_data
@@ -686,9 +678,36 @@ void ActionEngine::check_pending_completions() {
             }
 
             it = pending_.erase(it);
-        } else {
-            ++it;
+            continue;
         }
+
+        // No true post-frame yet. If we've waited past the timeout, don't drop
+        // the action — fall back to the latest available frame so the action is
+        // still recorded (with a slightly stale post-frame). This matters when
+        // the compositor stops delivering frames on a static screen.
+        if (now - it->creation_ts > POST_FRAME_TIMEOUT) {
+            FrameSlot latest;
+            if (buffer_.get_latest_frame(latest)) {
+                std::cerr << "[ActionEngine] Action " << it->action_id
+                          << " post-frame timed out; using latest frame as fallback"
+                          << std::endl;
+                auto completed = finalize_action(*it, std::move(latest));
+                {
+                    std::lock_guard olock(output_mu_);
+                    completed_.push_back(std::move(completed));
+                }
+            } else {
+                // No frame exists at all (capture never produced one) — only
+                // then do we drop.
+                std::cerr << "[ActionEngine] Action " << it->action_id
+                          << " timed out with no frames available; dropping"
+                          << std::endl;
+            }
+            it = pending_.erase(it);
+            continue;
+        }
+
+        ++it;
     }
 }
 

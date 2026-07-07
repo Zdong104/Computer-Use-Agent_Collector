@@ -233,6 +233,7 @@ bool PipeWireCapture::capture_frame() {
 
     buffer_.commit_write();
     last_frame_ts_ = now;
+    frames_captured_.fetch_add(1, std::memory_order_relaxed);
 
     SelectObject(memory_dc, old);
     DeleteObject(bitmap);

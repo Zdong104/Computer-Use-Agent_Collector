@@ -153,8 +153,11 @@ public:
     /// Min distance or hold time to classify as drag
     static constexpr double DRAG_MIN_DISTANCE = 3.0;
     static constexpr double DRAG_MIN_HOLD_TIME = 0.300;
-    /// Max time to wait for post-frame before giving up (seconds)
-    static constexpr double POST_FRAME_TIMEOUT = 5.0;
+    /// Max time to wait for a true post-frame before falling back to the
+    /// latest available frame (seconds). With the capture keepalive timer a
+    /// fresh frame normally arrives within one frame interval, so this only
+    /// governs the rare fallback path — keep it short.
+    static constexpr double POST_FRAME_TIMEOUT = 1.0;
 
     /// Min hold time for a modifier release to be considered intentional (ms).
     /// Releases shorter than this are ignored (accidental modifier taps).

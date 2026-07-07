@@ -127,6 +127,36 @@ bool RingBuffer::find_post_frame(double target_ts, FrameSlot& out) const {
     return true;
 }
 
+bool RingBuffer::get_latest_frame(FrameSlot& out) const {
+    // LOCK-FREE: scan for the committed frame with the highest timestamp.
+    const FrameSlot* best = nullptr;
+    double best_ts = -1.0;
+
+    for (size_t i = 0; i < capacity_; ++i) {
+        const auto& slot = slots_[i];
+        if (slot.valid && (slot.seq >= 2 && (slot.seq % 2) == 0)) {
+            if (slot.timestamp_sec > best_ts) {
+                best_ts = slot.timestamp_sec;
+                best = &slot;
+            }
+        }
+    }
+
+    if (!best) return false;
+
+    out.frame_id = best->frame_id;
+    out.timestamp_sec = best->timestamp_sec;
+    out.width = best->width;
+    out.height = best->height;
+    out.valid = true;
+
+    size_t data_size = static_cast<size_t>(best->width) * best->height * 3;
+    out.rgb_data.resize(data_size);
+    std::memcpy(out.rgb_data.data(), best->rgb_data.data(), data_size);
+
+    return true;
+}
+
 double RingBuffer::latest_timestamp() const {
     // LOCK-FREE
     double latest = 0.0;

@@ -1143,6 +1143,17 @@ class CollectorV2:
             self.task_start_mono = time.monotonic() + self.START_CAPTURE_SETTLE_SEC
             self.state = 'CAPTURING'
 
+            # Snapshot capture instrumentation so we can report frame supply
+            # and the action miss rate when the task ends.
+            self._task_start_wall = time.monotonic()
+            try:
+                cap, keep = self.engine.capture_stats()
+            except Exception:
+                cap, keep = 0, 0
+            self._task_start_frames_captured = cap
+            self._task_start_frames_keepalive = keep
+            self._task_timeouts = 0
+
         self.overlay.update_state('CAPTURING', desc[:30])
         print(f'✅ Task "{desc}" started  (id: {tid})')
         print("   Actions are being captured automatically!")
@@ -1170,6 +1181,29 @@ class CollectorV2:
 
         self.overlay.update_state('IDLE')
         print(f'\n🏁 Task "{desc}" ended. {n} actions recorded.\n')
+
+        # Report capture instrumentation: effective frame supply and how many
+        # of it came from the keepalive re-emit path (static-screen frames).
+        try:
+            cap, keep = self.engine.capture_stats()
+        except Exception:
+            cap = keep = None
+        if cap is not None:
+            elapsed = max(1e-3, time.monotonic() - getattr(self, '_task_start_wall', time.monotonic()))
+            d_cap = cap - getattr(self, '_task_start_frames_captured', 0)
+            d_keep = keep - getattr(self, '_task_start_frames_keepalive', 0)
+            total = d_cap + d_keep
+            fps = total / elapsed
+            print(
+                f"   📊 Capture: {total} frames in {elapsed:.1f}s "
+                f"({fps:.1f} fps) — {d_cap} live, {d_keep} keepalive"
+            )
+            if d_keep > 0:
+                pct = 100.0 * d_keep / max(1, total)
+                print(
+                    f"      ℹ️  {pct:.0f}% of frames were keepalive re-emits "
+                    f"(screen was static; these previously caused timeouts)."
+                )
 
     def _handle_completed_action(self, action):
         """Process a completed action from the C++ engine."""
