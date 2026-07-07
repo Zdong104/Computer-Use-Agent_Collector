@@ -178,8 +178,9 @@ collector instead.
 ```bibtex
 @misc{dong2026cuacollector,
   author = {Zihan Dong},
-  title = {ComputerUseAgent_Collector},
+  title = {ComputerUseAgent\_Collector},
   year = {2026},
+  url = {https://github.com/Zdong104/Computer-Use-Agent_Collector},
   note = {Computer Use Agent behavior cloning tool}
 }
 ```
