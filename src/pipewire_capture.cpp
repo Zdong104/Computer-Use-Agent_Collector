@@ -250,7 +250,18 @@ bool PipeWireCapture::spawn_gjs_helper(const std::string& script_path) {
     }
 
     pw_fd_ = received_fd;
-    log_status("Portal ready: node=" + std::to_string(pw_node_id_));
+
+    // Selected-monitor geometry reported by the portal (logical coords).
+    portal_pos_x_ = extract_json_int(payload, "pos_x", -1);
+    portal_pos_y_ = extract_json_int(payload, "pos_y", -1);
+    portal_size_w_ = extract_json_int(payload, "size_w", -1);
+    portal_size_h_ = extract_json_int(payload, "size_h", -1);
+
+    log_status("Portal ready: node=" + std::to_string(pw_node_id_) +
+               " pos=(" + std::to_string(portal_pos_x_) + "," +
+               std::to_string(portal_pos_y_) + ") size=" +
+               std::to_string(portal_size_w_) + "x" +
+               std::to_string(portal_size_h_));
     return true;
 }
 

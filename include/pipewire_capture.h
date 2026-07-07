@@ -41,6 +41,12 @@ public:
     int node_id() const { return -1; }
     int pw_fd() const { return -1; }
 
+    // Portal-reported geometry of the selected monitor (stub: unknown = -1).
+    int portal_position_x() const { return -1; }
+    int portal_position_y() const { return -1; }
+    int portal_size_w() const { return -1; }
+    int portal_size_h() const { return -1; }
+
     using StatusCallback = std::function<void(const std::string&)>;
     void set_status_callback(StatusCallback cb) { status_cb_ = std::move(cb); }
 
@@ -134,6 +140,13 @@ public:
     /// @return PipeWire FD (after init_portal)
     int pw_fd() const { return pw_fd_; }
 
+    // Portal-reported geometry of the selected monitor, in logical coords
+    // (after init_portal). -1 if the portal did not report it.
+    int portal_position_x() const { return portal_pos_x_; }
+    int portal_position_y() const { return portal_pos_y_; }
+    int portal_size_w() const { return portal_size_w_; }
+    int portal_size_h() const { return portal_size_h_; }
+
     /// Callback type for status notifications
     using StatusCallback = std::function<void(const std::string&)>;
     void set_status_callback(StatusCallback cb) { status_cb_ = std::move(cb); }
@@ -153,6 +166,11 @@ private:
     // Portal session state
     int pw_fd_{-1};
     int pw_node_id_{-1};
+    // Selected-monitor geometry from the portal (logical coords; -1 = unknown)
+    int portal_pos_x_{-1};
+    int portal_pos_y_{-1};
+    int portal_size_w_{-1};
+    int portal_size_h_{-1};
     pid_t gjs_pid_{-1};
     int gjs_stdin_fd_{-1};
     int gjs_stdout_fd_{-1};

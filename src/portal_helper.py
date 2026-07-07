@@ -90,6 +90,24 @@ def main():
             stream = streamsVariant.get_child_value(0)
             pwNodeId = stream.get_child_value(0).get_uint32()
 
+            # The stream's properties dict carries the selected monitor's
+            # logical position and size — the authoritative geometry of the
+            # screen the user picked in the portal dialog. Extract it so the
+            # collector can map input coordinates to the same monitor.
+            pos_x = pos_y = size_w = size_h = -1
+            try:
+                props = stream.get_child_value(1)
+                pos = props.lookup_value('position', None)
+                sz = props.lookup_value('size', None)
+                if pos is not None:
+                    px, py = pos.unpack()
+                    pos_x, pos_y = int(px), int(py)
+                if sz is not None:
+                    sw, sh = sz.unpack()
+                    size_w, size_h = int(sw), int(sh)
+            except Exception as e:
+                print(f"Could not read stream geometry: {e}", file=sys.stderr)
+
             try:
                 res_variant, fd_list = portal.call_with_unix_fd_list_sync(
                     'OpenPipeWireRemote',
@@ -104,7 +122,11 @@ def main():
                 return
 
             # SEND THE FD VIA UNIX SOCKET SCM_RIGHTS!
-            msg = json.dumps({"ready": True, "node_id": pwNodeId}).encode('utf-8')
+            msg = json.dumps({
+                "ready": True, "node_id": pwNodeId,
+                "pos_x": pos_x, "pos_y": pos_y,
+                "size_w": size_w, "size_h": size_h,
+            }).encode('utf-8')
             try:
                 import array
                 socket.send_fds(sock, [msg], [pwFd])

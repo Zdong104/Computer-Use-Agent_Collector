@@ -1,0 +1,9 @@
+# Extra dependencies for Extension_AgentCollector (agent-side only).
+# Install into the same venv as the collector:
+#   .venv/bin/pip install -r Extension_AgentCollector/requirements.txt
+#
+# The root project already provides Pillow and mss (used here for geometry only).
+
+# Pure-python D-Bus client used for Wayland XDG-portal screenshots
+# (mss pixel-grab fails on Wayland; the portal is the reliable source).
+jeepney

@@ -151,6 +151,12 @@ public:
     /// Is capture running?
     bool is_running() const { return capture_.is_running(); }
 
+    /// Portal-reported geometry of the selected monitor (logical coords, -1 unknown)
+    int portal_position_x() const { return capture_.portal_position_x(); }
+    int portal_position_y() const { return capture_.portal_position_y(); }
+    int portal_size_w() const { return capture_.portal_size_w(); }
+    int portal_size_h() const { return capture_.portal_size_h(); }
+
     /// Get cursor position (for Python compat)
     std::pair<int, int> get_cursor_position() {
         return input_.get_cursor_position();
@@ -370,6 +376,14 @@ PYBIND11_MODULE(cua_capture, m) {
              &cua::CaptureEngine::latest_frame_ts)
         .def_property_readonly("is_running",
              &cua::CaptureEngine::is_running)
+        .def_property_readonly("portal_position_x",
+             &cua::CaptureEngine::portal_position_x)
+        .def_property_readonly("portal_position_y",
+             &cua::CaptureEngine::portal_position_y)
+        .def_property_readonly("portal_size_w",
+             &cua::CaptureEngine::portal_size_w)
+        .def_property_readonly("portal_size_h",
+             &cua::CaptureEngine::portal_size_h)
         .def("get_cursor_position",
              &cua::CaptureEngine::get_cursor_position)
         // Testing helpers

@@ -15,6 +15,7 @@ data/
 *.mp4
 *.gif
 .codex
+.env
 
 # Generated build trees
 build/

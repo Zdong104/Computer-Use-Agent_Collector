@@ -42,6 +42,20 @@ from typing import Optional, Tuple, List
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image as PILImage
 import io
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import tkinter as tk
+try:
+    import pyautogui
+    pyautogui.PAUSE = 0.05
+    pyautogui.FAILSAFE = True
+except Exception:
+    pyautogui = None
+
+try:
+    from wayland_input import WaylandInputController
+except ImportError:
+    WaylandInputController = None
+
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, 'reconfigure'):
@@ -207,6 +221,117 @@ class DataStore:
 
 
 # ============================================================
+# Lock Overlay (Tkinter) — for Agent GUI Control
+# ============================================================
+
+class LockOverlayWindow(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Agent Control Active")
+        self.withdraw()
+        
+        self.user_aborted = False
+        self.overrideredirect(True)
+        self.attributes('-topmost', True)
+        
+        try:
+            self.attributes('-alpha', 0.88)
+        except Exception:
+            pass
+            
+        self.configure(bg='#0b0f19')  # slate-950
+        
+        # Center container
+        container = tk.Frame(self, bg='#0b0f19')
+        container.place(relx=0.5, rely=0.5, anchor='center')
+        
+        # Beautiful icon/emoji
+        self.loader_label = tk.Label(
+            container, text="🤖", font=("Helvetica", 72),
+            bg='#0b0f19', fg='#3b82f6'
+        )
+        self.loader_label.pack(pady=20)
+        
+        # Pulsing status
+        self.status_label = tk.Label(
+            container, text="Agent Executing Action...",
+            font=("Helvetica", 26, "bold"), bg='#0b0f19', fg='#f8fafc'
+        )
+        self.status_label.pack(pady=10)
+        
+        self.detail_label = tk.Label(
+            container, text="Please do not move mouse or press keys.",
+            font=("Helvetica", 14), bg='#0b0f19', fg='#94a3b8'
+        )
+        self.detail_label.pack(pady=5)
+        
+        # Cancel info
+        self.cancel_label = tk.Label(
+            container, text="Press ESC to force reclaim control",
+            font=("Helvetica", 12, "italic"), bg='#0b0f19', fg='#ef4444'
+        )
+        self.cancel_label.pack(pady=25)
+        
+        self.bind('<Escape>', self.force_release)
+        
+        # Start the pulse animation
+        self.start_pulse()
+        
+    def start_pulse(self):
+        self._pulse_val = 0
+        self._pulse_dir = 1
+        self._animate_pulse()
+        
+    def _animate_pulse(self):
+        if not self.winfo_exists():
+            return
+        self._pulse_val += self._pulse_dir * 4
+        if self._pulse_val >= 100:
+            self._pulse_val = 100
+            self._pulse_dir = -1
+        elif self._pulse_val <= 0:
+            self._pulse_val = 0
+            self._pulse_dir = 1
+            
+        r = int(59 + (168 - 59) * (self._pulse_val / 100.0))
+        g = int(130 + (85 - 130) * (self._pulse_val / 100.0))
+        b = int(246 + (247 - 246) * (self._pulse_val / 100.0))
+        color_hex = f"#{r:02x}{g:02x}{b:02x}"
+        
+        self.status_label.config(fg=color_hex)
+        self.loader_label.config(fg=color_hex)
+        
+        self.after(40, self._animate_pulse)
+        
+    def update_geometry(self):
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        self.geometry(f"{sw}x{sh}+0+0")
+        
+    def show_lock(self, message="Agent Executing Action..."):
+        self.update_geometry()
+        self.status_label.config(text=message)
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self.grab_set()
+        self.update()
+        
+    def hide_lock(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.withdraw()
+        self.update()
+        
+    def force_release(self, event=None):
+        print("🚨 Force release triggered by user!")
+        self.user_aborted = True
+        self.hide_lock()
+
+
+# ============================================================
 # Status Overlay (Tkinter) — reused from V1
 # ============================================================
 
@@ -234,6 +359,7 @@ class StatusOverlay:
         self._pending_state = 'IDLE'
         self._pending_text = None
         self._dialog = None
+        self._lock_window = None
 
     def start(self):
         self._running = True
@@ -242,7 +368,6 @@ class StatusOverlay:
         time.sleep(0.8)
 
     def _run_tk(self):
-        import tkinter as tk
         self._root = tk.Tk()
         self._root.title("CUA Collector")
         self._root.attributes('-topmost', True)
@@ -265,8 +390,31 @@ class StatusOverlay:
         except Exception:
             pass
 
+        # Create Lock Window as child of self._root
+        self._lock_window = LockOverlayWindow(self._root)
+
         self._poll()
         self._root.mainloop()
+
+    def show_lock(self, message="Agent Executing Action..."):
+        if self._root and self._lock_window:
+            self._lock_window.show_lock(message)
+            
+    def hide_lock(self):
+        if self._root and self._lock_window:
+            self._lock_window.hide_lock()
+            
+    @property
+    def user_aborted(self):
+        if self._lock_window:
+            return self._lock_window.user_aborted
+        return False
+        
+    @user_aborted.setter
+    def user_aborted(self, value):
+        if self._lock_window:
+            self._lock_window.user_aborted = value
+
 
     def _poll(self):
         if not self._running:
@@ -511,83 +659,164 @@ def enumerate_windows_screens() -> List[ScreenRegion]:
 
 
 def choose_capture_screen_gui(monitors: List[ScreenRegion]) -> Optional[ScreenRegion]:
+    # Removed: the Tkinter screen picker was redundant with the GNOME portal's
+    # own "Share Screen" dialog (which is authoritative on Wayland). Screen
+    # selection now comes from the portal via resolve_screen_from_portal(), and
+    # X11/Windows fall through to the console prompt in choose_capture_screen().
+    return None
+
+
+
+
+
+def _enumerate_linux_monitors() -> List['ScreenRegion']:
+    """Enumerate physical monitors via mss (same ordering the collector uses)."""
+    monitors: List[ScreenRegion] = []
     try:
-        import tkinter as tk
+        import mss
+        with mss.mss() as sct:
+            for idx, m in enumerate(sct.monitors[1:], 1):
+                monitors.append(ScreenRegion(
+                    index=idx,
+                    name=f"Monitor {idx}",
+                    left=m['left'],
+                    top=m['top'],
+                    width=m['width'],
+                    height=m['height'],
+                    physical_left=m['left'],
+                    physical_top=m['top'],
+                    physical_width=m['width'],
+                    physical_height=m['height'],
+                    primary=(idx == 1),
+                ))
+    except Exception:
+        pass
+    return monitors
+
+
+def _mutter_logical_monitors():
+    """Return [(logical_x, logical_y, scale), ...] from Mutter, or [] if absent.
+
+    The XDG ScreenCast portal reports the selected monitor's position/size in
+    *logical* coordinates, which match Mutter's logical monitor layout exactly.
+    """
+    try:
+        from jeepney import DBusAddress, new_method_call
+        from jeepney.io.blocking import open_dbus_connection
+        addr = DBusAddress(
+            object_path="/org/gnome/Mutter/DisplayConfig",
+            bus_name="org.gnome.Mutter.DisplayConfig",
+            interface="org.gnome.Mutter.DisplayConfig",
+        )
+        conn = open_dbus_connection(bus="SESSION")
+        try:
+            reply = conn.send_and_get_reply(
+                new_method_call(addr, "GetCurrentState", "", ())
+            )
+        finally:
+            conn.close()
+        _serial, _monitors, logical_monitors, _props = reply.body
+        out = []
+        for lm in logical_monitors:
+            x, y, scale = lm[0], lm[1], lm[2]
+            out.append((int(x), int(y), float(scale)))
+        return out
     except Exception:
         return None
 
-    selected: List[Optional[ScreenRegion]] = [None]
-    root = tk.Tk()
-    root.title("Select Screen")
-    root.attributes('-topmost', True)
-    root.resizable(False, False)
 
-    default = next((m for m in monitors if m.primary), monitors[0])
+def resolve_screen_from_portal(engine, monitors: Optional[List['ScreenRegion']] = None
+                               ) -> Optional['ScreenRegion']:
+    """Build the capture ScreenRegion from the portal-selected monitor.
 
-    tk.Label(
-        root,
-        text="Select screen to record",
-        font=("Segoe UI", 16, "bold"),
-        padx=24,
-        pady=12,
-    ).pack(fill='x')
-    tk.Label(
-        root,
-        text="Actions and screenshots will use the selected screen's local coordinates.",
-        font=("Segoe UI", 10),
-        fg="#555",
-        padx=24,
-    ).pack(fill='x')
+    Reads the portal geometry the engine learned during init_portal() (logical
+    position/size), maps it to a physical mss monitor, and returns that
+    ScreenRegion — so capture and uinput injection refer to the same screen the
+    user picked in the GNOME dialog. Returns None if geometry is unavailable.
+    """
+    px = getattr(engine, 'portal_position_x', lambda: -1)
+    # engine exposes read-only properties, not methods
+    try:
+        px = engine.portal_position_x
+        py = engine.portal_position_y
+        pw = engine.portal_size_w
+        ph = engine.portal_size_h
+    except Exception:
+        return None
+    if px < 0 or py < 0 or pw <= 0 or ph <= 0:
+        return None
 
-    body = tk.Frame(root, padx=20, pady=16)
-    body.pack(fill='both')
+    if monitors is None:
+        monitors = _enumerate_linux_monitors()
+    if not monitors:
+        return None
 
-    def pick(monitor: ScreenRegion):
-        selected[0] = monitor
-        root.destroy()
+    # Map the portal's logical position → a physical mss monitor.
+    # Strategy 1: use Mutter logical layout to find which logical monitor sits at
+    # the portal position, then match its physical rect against mss by scaling.
+    logical = _mutter_logical_monitors()
+    if logical:
+        # Find the logical monitor whose origin matches the portal position.
+        match = None
+        for (lx, ly, scale) in logical:
+            if abs(lx - px) <= 2 and abs(ly - py) <= 2:
+                match = (lx, ly, scale)
+                break
+        if match is not None:
+            lx, ly, scale = match
+            # Physical origin = logical origin * scale (mss reports physical px).
+            phys_x = round(lx * scale)
+            phys_y = round(ly * scale)
+            for m in monitors:
+                if abs(m.physical_left - phys_x) <= 2 and abs(m.physical_top - phys_y) <= 2:
+                    print(f"  🎯 Portal-selected screen matched: #{m.index} "
+                          f"{m.width}x{m.height} at ({m.left},{m.top}) "
+                          f"[portal logical ({px},{py}) {pw}x{ph}, scale {scale}]")
+                    return m
 
-    for monitor in monitors:
-        primary = " primary" if monitor.primary else ""
-        text = (
-            f"Display {monitor.index}{primary}\n"
-            f"{monitor.name}  {monitor.width}x{monitor.height}\n"
-            f"Desktop position ({monitor.left},{monitor.top})"
-        )
-        button = tk.Button(
-            body,
-            text=text,
-            justify='left',
-            anchor='w',
-            width=42,
-            padx=12,
-            pady=8,
-            command=lambda m=monitor: pick(m),
-        )
-        button.pack(fill='x', pady=4)
-        if monitor.index == default.index:
-            button.focus_set()
+    # Strategy 2 (fallback): match by scaled position directly against mss,
+    # trying common integer scales. Position disambiguates identical resolutions.
+    for scale in (1.0, 1.25, 1.5, 2.0, 2.5, 3.0):
+        phys_x = round(px * scale)
+        phys_y = round(py * scale)
+        for m in monitors:
+            if abs(m.physical_left - phys_x) <= 2 and abs(m.physical_top - phys_y) <= 2:
+                print(f"  🎯 Portal-selected screen matched (scale {scale}): "
+                      f"#{m.index} {m.width}x{m.height} at ({m.left},{m.top})")
+                return m
 
-    def use_default(_event=None):
-        pick(default)
-        return 'break'
-
-    root.bind('<Return>', use_default)
-    root.bind('<Escape>', use_default)
-    root.update_idletasks()
-    w = root.winfo_width()
-    h = root.winfo_height()
-    sw = root.winfo_screenwidth()
-    sh = root.winfo_screenheight()
-    root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
-    root.mainloop()
-    return selected[0]
+    print(f"  ⚠️ Could not match portal geometry (logical ({px},{py}) {pw}x{ph}) "
+          f"to any monitor; leaving capture screen unset.")
+    return None
 
 
 def choose_capture_screen(screen_index: Optional[int] = None) -> Optional[ScreenRegion]:
-    if OS_NAME != 'windows':
+    if OS_NAME == 'windows':
+        monitors = enumerate_windows_screens()
+    elif OS_NAME == 'linux':
+        try:
+            import mss
+            with mss.mss() as sct:
+                monitors = []
+                for idx, m in enumerate(sct.monitors[1:], 1):
+                    monitors.append(ScreenRegion(
+                        index=idx,
+                        name=f"Monitor {idx}",
+                        left=m['left'],
+                        top=m['top'],
+                        width=m['width'],
+                        height=m['height'],
+                        physical_left=m['left'],
+                        physical_top=m['top'],
+                        physical_width=m['width'],
+                        physical_height=m['height'],
+                        primary=(idx == 1)
+                    ))
+        except Exception:
+            return None
+    else:
         return None
 
-    monitors = enumerate_windows_screens()
     if not monitors:
         print("  [WARN] Could not enumerate Windows monitors; falling back to virtual desktop capture.")
         return None
@@ -613,10 +842,6 @@ def choose_capture_screen(screen_index: Optional[int] = None) -> Optional[Screen
 
     if selected is None and len(monitors) == 1:
         selected = monitors[0]
-
-    if selected is None:
-        if os.environ.get('CUA_CAPTURE_PROMPT', '').strip().lower() != 'console':
-            selected = choose_capture_screen_gui(monitors)
 
     if selected is None:
         print("\nSelect screen to record:")
@@ -667,11 +892,20 @@ class CollectorV2:
                  max_width: int = 3840,
                  max_height: int = 2400,
                  target_fps: int = 10,
-                 screen_index: Optional[int] = None):
+                 screen_index: Optional[int] = None,
+                 agent_port: int = 8321):
         self.state = 'IDLE'
         self.data_store = DataStore(data_dir)
         self.overlay = StatusOverlay()
-        self.capture_screen = choose_capture_screen(screen_index)
+        # On Wayland-GNOME the capture screen is derived from the portal
+        # selection in run() (after init_portal), so we don't prompt here.
+        # On X11/Windows, select up front as before.
+        self._screen_index = screen_index
+        if SESSION_TYPE == 'wayland-gnome':
+            self.capture_screen = None
+        else:
+            self.capture_screen = choose_capture_screen(screen_index)
+        self.agent_port = agent_port
 
         if self.capture_screen is not None:
             max_width = max(max_width, self.capture_screen.width)
@@ -766,19 +1000,64 @@ class CollectorV2:
         self.overlay.start()
         self.overlay.update_state('IDLE')
 
-        # Initialize the selected capture backend. PipeWire may show a share dialog.
-        print(f"  🖥️  Initializing {CAPTURE_BACKEND_NAME} screen capture...")
-        if not self.engine.init_portal():
-            print("  ❌ Failed to initialize screen capture!")
-            if CAPTURE_BACKEND_NAME == 'pipewire+libevdev':
+        # On Wayland, initialize the portal FIRST (this shows the single GNOME
+        # "Share Screen" dialog) so we can derive the selected monitor's geometry
+        # before building the uinput controller. The portal is the sole source of
+        # truth for which screen is captured and controlled.
+        portal_first = (SESSION_TYPE == 'wayland-gnome')
+        if portal_first:
+            print(f"  🖥️  Initializing {CAPTURE_BACKEND_NAME} screen capture...")
+            if not self.engine.init_portal():
+                print("  ❌ Failed to initialize screen capture!")
                 print("  Make sure you're on Wayland/GNOME and approved the share dialog.")
+                return
+            # Derive the capture screen from the portal selection.
+            resolved = resolve_screen_from_portal(self.engine)
+            if resolved is not None:
+                self.capture_screen = resolved
+                self.resolution = (resolved.width, resolved.height)
             else:
+                # Fallback: honor an explicit --screen-index if the match failed.
+                self.capture_screen = choose_capture_screen(self._screen_index)
+                if self.capture_screen is not None:
+                    self.resolution = (self.capture_screen.width, self.capture_screen.height)
+
+        # Setup WaylandInputController now that the selected screen is known, so
+        # the uinput virtual devices exist when the C++ engine scans /dev/input
+        # inside self.engine.start().
+        self.wayland_ctrl = None
+        if SESSION_TYPE == 'wayland-gnome' and WaylandInputController is not None and self.capture_screen is not None:
+            monitor = self.capture_screen
+            frame_w, frame_h = self.resolution
+            if monitor.width == 3840 and monitor.height == 2160:
+                frame_w, frame_h = 1920, 1080
+            print("🎮 Initializing Wayland Input Controller at startup...")
+            try:
+                self.wayland_ctrl = WaylandInputController(
+                    monitor_physical_left=monitor.physical_left,
+                    monitor_physical_top=monitor.physical_top,
+                    monitor_physical_width=monitor.physical_width,
+                    monitor_physical_height=monitor.physical_height,
+                    frame_width=frame_w,
+                    frame_height=frame_h,
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to create Wayland uinput virtual devices at startup: {e}")
+
+        # Initialize capture backend for non-Wayland paths (portal already done above).
+        if not portal_first:
+            print(f"  🖥️  Initializing {CAPTURE_BACKEND_NAME} screen capture...")
+            if not self.engine.init_portal():
+                print("  ❌ Failed to initialize screen capture!")
                 print("  Make sure mss/pynput dependencies are installed and OS permissions are granted.")
-            return
+                return
 
         # Start capture + input monitoring
         self.engine.start()
         print("✅ Capture engine running. Press Ctrl+F8 to start a task.\n")
+
+        # Start agent server
+        self.agent_server = start_agent_server(self, start_port=self.agent_port)
 
         try:
             while True:
@@ -1043,12 +1322,390 @@ class CollectorV2:
     def _cleanup(self):
         if self.current_task:
             self._finalize_task()
+        if hasattr(self, 'agent_server') and self.agent_server:
+            try:
+                self.agent_server.shutdown()
+            except Exception:
+                pass
         self.engine.stop()
         self._io_pool.shutdown(wait=True)
         self.overlay.stop()
         self.data_store.save_master_index(self._all_tasks)
         print("👋 Done.")
         os._exit(0)
+
+
+# ============================================================
+# Agent API Server & Control Helper
+# ============================================================
+
+def run_on_gui_thread(collector, func):
+    result = []
+    exception = []
+    event = threading.Event()
+    
+    def wrapped():
+        try:
+            res = func()
+            result.append(res)
+        except Exception as e:
+            exception.append(e)
+        finally:
+            event.set()
+            
+    if collector.overlay._root:
+        collector.overlay._root.after(0, wrapped)
+        event.wait()
+    else:
+        wrapped()
+        
+    if exception:
+        raise exception[0]
+    return result[0] if result else None
+
+
+class AgentAPIHandler(BaseHTTPRequestHandler):
+    collector = None
+
+    def log_message(self, format, *args):
+        # Silence logs
+        pass
+
+    def _send_json(self, data, status_code=200):
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+
+    def do_GET(self):
+        if self.path == '/api/status':
+            status = {
+                "state": self.collector.state,
+                "task_active": self.collector.current_task is not None,
+                "task_id": self.collector.current_task.task_id if self.collector.current_task else None,
+                "num_actions": len(self.collector.current_task.actions) if self.collector.current_task else 0,
+            }
+            # Expose the screen selected at startup so agent clients can capture
+            # the exact monitor the collector controls (no manual re-selection).
+            cs = self.collector.capture_screen
+            status["capture_screen"] = None if cs is None else {
+                "index": cs.index, "name": cs.name,
+                "left": cs.left, "top": cs.top,
+                "width": cs.width, "height": cs.height,
+            }
+            self._send_json(status)
+        else:
+            self._send_json({"error": "Not Found"}, 404)
+
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            self._send_json({"error": "Invalid JSON"}, 400)
+            return
+
+        if self.path == '/api/task/start':
+            desc = data.get('description', 'Agent Automated Task')
+
+            def run_start():
+                if self.collector.state != 'IDLE':
+                    return {"error": "Task already active"}, 400
+                tid = datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:8]
+                self.collector.current_task = TaskRecord(
+                    task_id=tid, description=desc,
+                    start_time=datetime.now(timezone.utc).isoformat(),
+                    end_time=None,
+                    os_name=OS_NAME, session_type=SESSION_TYPE,
+                    screen_resolution=self.collector.resolution,
+                )
+                self.collector.data_store.create_task_dir(tid)
+                self.collector.seq = 0
+                while self.collector.engine.pop_action() is not None:
+                    pass
+                while self.collector.engine.pop_hotkey() is not None:
+                    pass
+                self.collector.task_start_mono = time.monotonic() + self.collector.START_CAPTURE_SETTLE_SEC
+                self.collector.state = 'CAPTURING'
+                self.collector.overlay.update_state('CAPTURING', desc[:30])
+                print(f'🤖 Agent Task "{desc}" started (id: {tid})')
+                return {"status": "success", "task_id": tid}
+
+            try:
+                res = run_on_gui_thread(self.collector, run_start)
+                if isinstance(res, dict) and "error" in res:
+                    self._send_json(res, 400)
+                else:
+                    self._send_json(res, 200)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+
+        elif self.path == '/api/task/end':
+            def run_end():
+                if self.collector.state == 'IDLE':
+                    return {"error": "No task active"}
+                self.collector._finalize_task()
+                return {"status": "success"}
+
+            try:
+                res = run_on_gui_thread(self.collector, run_end)
+                if isinstance(res, dict) and "error" in res:
+                    self._send_json(res, 400)
+                else:
+                    self._send_json(res, 200)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+
+        elif self.path == '/api/action':
+            if self.collector.state != 'CAPTURING':
+                self._send_json({"error": "No active task. Start a task first."}, 400)
+                return
+
+            action_type = data.get('type')
+            if not action_type:
+                self._send_json({"error": "Missing action type"}, 400)
+                return
+
+            if not pyautogui and not WaylandInputController:
+                self._send_json({"error": "No input backend available (pyautogui or wayland_input)"}, 500)
+                return
+
+            def run_action():
+                if self.collector.overlay.user_aborted:
+                    self.collector.overlay.user_aborted = False
+                    return {"error": "Aborted by user"}, 499
+
+                # On Wayland, skip the Tkinter overlay — it runs on XWayland
+                # and can't cover native Wayland windows, but DOES steal keyboard
+                # focus from them, breaking hotkey/keyboard input.
+                skip_overlay = (SESSION_TYPE == 'wayland-gnome')
+                if not skip_overlay:
+                    self.collector.overlay.show_lock("🤖 Agent Executing Action...")
+                try:
+                    monitor = self.collector.capture_screen
+                    frame_w, frame_h = self.collector.resolution
+                    # Fallback for Wayland-GNOME before first screenshot updates self.resolution
+                    if SESSION_TYPE == 'wayland-gnome' and monitor and frame_w == monitor.width and frame_h == monitor.height:
+                        # 3840x2160 is physical, PipeWire streams at 1920x1080
+                        if monitor.width == 3840 and monitor.height == 2160:
+                            frame_w, frame_h = 1920, 1080
+
+                    if monitor:
+                        scale_x = monitor.physical_width / frame_w if frame_w > 0 else 1.0
+                        scale_y = monitor.physical_height / frame_h if frame_h > 0 else 1.0
+                        offset_x = monitor.physical_left
+                        offset_y = monitor.physical_top
+                    else:
+                        scale_x, scale_y = 1.0, 1.0
+                        offset_x, offset_y = 0, 0
+
+                    # On Wayland, use kernel-level input via evdev/uinput
+                    # so we can control native Wayland windows (not just X11)
+                    use_wayland_input = (
+                        SESSION_TYPE == 'wayland-gnome'
+                        and WaylandInputController is not None
+                        and monitor is not None
+                    )
+
+                    if use_wayland_input:
+                        # Use pre-initialized WaylandInputController from collector
+                        if not hasattr(self.collector, 'wayland_ctrl') or self.collector.wayland_ctrl is None:
+                            # Lazy fallback
+                            self.collector.wayland_ctrl = WaylandInputController(
+                                monitor_physical_left=monitor.physical_left,
+                                monitor_physical_top=monitor.physical_top,
+                                monitor_physical_width=monitor.physical_width,
+                                monitor_physical_height=monitor.physical_height,
+                                frame_width=frame_w,
+                                frame_height=frame_h,
+                            )
+                        wctrl = self.collector.wayland_ctrl
+
+                    def input_block():
+                        if not skip_overlay:
+                            self.collector.overlay.hide_lock()
+                            # Short sleep to let the overlay withdraw
+                            time.sleep(0.1)
+                        ts_start = time.monotonic()
+
+                        if action_type == 'click':
+                            x, y = data['x'], data['y']
+                            button = data.get('button', 'left')
+                            if use_wayland_input:
+                                wctrl.click(x, y, button)
+                            else:
+                                pyautogui.click(x * scale_x + offset_x, y * scale_y + offset_y, button=button)
+                            self.collector.engine.inject_mouse_click(ts_start, x, y, button)
+
+                        elif action_type == 'double_click':
+                            x, y = data['x'], data['y']
+                            button = data.get('button', 'left')
+                            if use_wayland_input:
+                                wctrl.double_click(x, y, button)
+                            else:
+                                pyautogui.doubleClick(x * scale_x + offset_x, y * scale_y + offset_y, button=button)
+                            if hasattr(self.collector.engine, 'inject_mouse_double_click'):
+                                self.collector.engine.inject_mouse_double_click(ts_start, x, y, button)
+                            else:
+                                self.collector.engine.inject_mouse_click(ts_start, x, y, button)
+                                self.collector.engine.inject_mouse_click(ts_start + 0.1, x, y, button)
+
+                        elif action_type == 'drag':
+                            px, py = data['press_x'], data['press_y']
+                            rx, ry = data['release_x'], data['release_y']
+                            button = data.get('button', 'left')
+                            dur = data.get('duration', 0.5)
+                            if use_wayland_input:
+                                wctrl.drag(px, py, rx, ry, button, dur)
+                            else:
+                                pyautogui.moveTo(px * scale_x + offset_x, py * scale_y + offset_y)
+                                pyautogui.dragTo(rx * scale_x + offset_x, ry * scale_y + offset_y, button=button, duration=dur)
+                            self.collector.engine.inject_mouse_drag(ts_start, px, py, rx, ry, button, dur)
+
+                        elif action_type == 'write':
+                            text = data['text']
+                            if use_wayland_input:
+                                wctrl.write(text)
+                            else:
+                                pyautogui.write(text)
+                            for i, char in enumerate(text):
+                                ts_char = ts_start + i * 0.05
+                                self.collector.engine.inject_key_event(ts_char, char, True)
+                                self.collector.engine.inject_key_event(ts_char + 0.02, char, False)
+
+                        elif action_type == 'press_key':
+                            key = data['key']
+                            if use_wayland_input:
+                                wctrl.press_key(key)
+                            else:
+                                pyautogui.press(key)
+                            self.collector.engine.inject_key_event(ts_start, key, True)
+                            self.collector.engine.inject_key_event(ts_start + 0.05, key, False)
+
+                        elif action_type == 'hotkey':
+                            keys = data['keys']
+                            if use_wayland_input:
+                                wctrl.hotkey(*keys)
+                            else:
+                                pyautogui.hotkey(*keys)
+                            # Inject key events for the combo
+                            for i, key in enumerate(keys):
+                                self.collector.engine.inject_key_event(ts_start + i * 0.02, key, True)
+                            for i, key in enumerate(reversed(keys)):
+                                self.collector.engine.inject_key_event(ts_start + 0.1 + i * 0.02, key, False)
+
+                        elif action_type == 'scroll':
+                            dx = data.get('dx', 0)
+                            dy = data.get('dy', 0)
+                            x = data.get('x')
+                            y = data.get('y')
+                            if use_wayland_input:
+                                wctrl.scroll(x, y, dx, dy)
+                            else:
+                                if x is not None and y is not None:
+                                    pyautogui.moveTo(x * scale_x + offset_x, y * scale_y + offset_y)
+                                else:
+                                    ax, ay = pyautogui.position()
+                                    x = (ax - offset_x) / scale_x if scale_x > 0 else ax
+                                    y = (ay - offset_y) / scale_y if scale_y > 0 else ay
+                                pyautogui.scroll(dy)
+                                if dx != 0:
+                                    pyautogui.hscroll(dx)
+                            self.collector.engine.inject_scroll(ts_start, x, y, dx, dy)
+
+                        elif action_type == 'move':
+                            # Pointer move only; not a recorded action on its own
+                            # (matches human capture, where a bare move is not an action).
+                            x, y = data['x'], data['y']
+                            if use_wayland_input:
+                                wctrl.move_to(x, y)
+                            else:
+                                pyautogui.moveTo(x * scale_x + offset_x, y * scale_y + offset_y)
+
+                        elif action_type == 'right_click':
+                            x, y = data['x'], data['y']
+                            if use_wayland_input:
+                                wctrl.click(x, y, 'right')
+                            else:
+                                pyautogui.click(x * scale_x + offset_x, y * scale_y + offset_y, button='right')
+                            self.collector.engine.inject_mouse_click(ts_start, x, y, 'right')
+
+                        elif action_type == 'mouse_down':
+                            x = data.get('x')
+                            y = data.get('y')
+                            button = data.get('button', 'left')
+                            if use_wayland_input:
+                                wctrl.mouse_down(x, y, button)
+                            else:
+                                if x is not None and y is not None:
+                                    pyautogui.moveTo(x * scale_x + offset_x, y * scale_y + offset_y)
+                                pyautogui.mouseDown(button=button)
+
+                        elif action_type == 'mouse_up':
+                            x = data.get('x')
+                            y = data.get('y')
+                            button = data.get('button', 'left')
+                            if use_wayland_input:
+                                wctrl.mouse_up(x, y, button)
+                            else:
+                                if x is not None and y is not None:
+                                    pyautogui.moveTo(x * scale_x + offset_x, y * scale_y + offset_y)
+                                pyautogui.mouseUp(button=button)
+
+                        elif action_type == 'key_down':
+                            key = data['key']
+                            if use_wayland_input:
+                                wctrl.key_down(key)
+                            else:
+                                pyautogui.keyDown(key)
+                            self.collector.engine.inject_key_event(ts_start, key, True)
+
+                        elif action_type == 'key_up':
+                            key = data['key']
+                            if use_wayland_input:
+                                wctrl.key_up(key)
+                            else:
+                                pyautogui.keyUp(key)
+                            self.collector.engine.inject_key_event(ts_start, key, False)
+                        else:
+                            raise ValueError(f"Unknown action type: {action_type}")
+
+                        time.sleep(0.35)
+
+                    input_block()
+                finally:
+                    if not skip_overlay:
+                        self.collector.overlay.show_lock("🤖 Agent Executing Action...")
+
+                if not skip_overlay:
+                    self.collector.overlay.hide_lock()
+                return {"status": "success"}, 200
+
+            try:
+                res, code = run_on_gui_thread(self.collector, run_action)
+                self._send_json(res, code)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+        else:
+            self._send_json({"error": "Not Found"}, 404)
+
+
+def start_agent_server(collector, start_port=8321):
+    AgentAPIHandler.collector = collector
+    port = start_port
+    while port < start_port + 100:
+        try:
+            server = HTTPServer(('127.0.0.1', port), AgentAPIHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            print(f"🤖 Agent API server started on http://127.0.0.1:{port}")
+            collector.agent_port = port
+            return server
+        except OSError:
+            port += 1
+    print("❌ Failed to start Agent API server: all ports in range 8321-8421 in use.")
+    return None
 
 
 # ============================================================
@@ -1069,6 +1726,12 @@ def main():
         default=None,
         help='1-based Windows screen index to capture (left-to-right order)',
     )
+    parser.add_argument(
+        '--agent-port',
+        type=int,
+        default=8321,
+        help='Start port for local agent control API server (default: 8321)',
+    )
     args = parser.parse_args()
 
     collector = CollectorV2(
@@ -1078,6 +1741,7 @@ def main():
         max_height=args.max_height,
         target_fps=args.fps,
         screen_index=args.screen_index,
+        agent_port=args.agent_port,
     )
     collector.run()
 
