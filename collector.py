@@ -1333,6 +1333,8 @@ class CollectorV2:
             mouse_label = mouse_names[0]
             if action.type == 'double_click':
                 mouse_label = f"{mouse_label} double_click"
+            elif action.type == 'triple_click':
+                mouse_label = f"{mouse_label} triple_click"
             elif action.type == 'drag':
                 mouse_label = f"{mouse_label} drag"
             else:
@@ -1584,6 +1586,20 @@ class AgentAPIHandler(BaseHTTPRequestHandler):
                             else:
                                 self.collector.engine.inject_mouse_click(ts_start, x, y, button)
                                 self.collector.engine.inject_mouse_click(ts_start + 0.1, x, y, button)
+
+                        elif action_type == 'triple_click':
+                            x, y = data['x'], data['y']
+                            button = data.get('button', 'left')
+                            if use_wayland_input:
+                                wctrl.click(x, y, button)
+                                wctrl.click(x, y, button)
+                                wctrl.click(x, y, button)
+                            else:
+                                pyautogui.click(x * scale_x + offset_x, y * scale_y + offset_y,
+                                                button=button, clicks=3, interval=0.05)
+                            self.collector.engine.inject_mouse_click(ts_start, x, y, button)
+                            self.collector.engine.inject_mouse_click(ts_start + 0.1, x, y, button)
+                            self.collector.engine.inject_mouse_click(ts_start + 0.2, x, y, button)
 
                         elif action_type == 'drag':
                             px, py = data['press_x'], data['press_y']

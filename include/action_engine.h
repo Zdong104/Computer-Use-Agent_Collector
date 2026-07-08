@@ -33,6 +33,7 @@ namespace cua {
 enum class ActionType {
     CLICK,
     DOUBLE_CLICK,
+    TRIPLE_CLICK,
     DRAG,
     SCROLL,
     HOTKEY,
@@ -44,6 +45,7 @@ inline const char* action_type_str(ActionType t) {
     switch (t) {
         case ActionType::CLICK:        return "click";
         case ActionType::DOUBLE_CLICK: return "double_click";
+        case ActionType::TRIPLE_CLICK: return "triple_click";
         case ActionType::DRAG:         return "drag";
         case ActionType::SCROLL:       return "scroll";
         case ActionType::HOTKEY:       return "hotkey";
@@ -234,17 +236,21 @@ private:
     MouseButtonState mouse_middle_;
     std::unordered_map<std::string, KeyState> key_states_;
 
-    // Last click info for double-click detection
+    // Last click info for double-/triple-click detection
     double last_click_ts_{0};
     int    last_click_x_{0}, last_click_y_{0};
     std::string last_click_button_;
 
-    // Pending click that might become part of a double-click
+    // Pending click that might grow into a double- or triple-click.
+    // click_count_ is the number of clicks already folded into the held
+    // action (1 = single, 2 = double); a third click promotes it to a
+    // triple-click and flushes immediately.
     struct PendingClick {
         bool active{false};
         PendingAction action;
     };
     PendingClick pending_click_;
+    int click_count_{0};
 
     // Last scroll for burst merging
     double last_scroll_ts_{0};

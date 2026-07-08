@@ -277,26 +277,27 @@ void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
         action_x = state.down_x;
         action_y = state.down_y;
     } else {
-        // Click — check for double-click
+        // Click — decide whether it extends an in-progress click sequence
+        // into a double- or triple-click. The bookkeeping (advancing the
+        // counter, flushing) happens below where pending_click_ is updated.
         double since_last = ev.timestamp_sec - last_click_ts_;
         double click_dist = std::sqrt(
             std::pow(ev.x - last_click_x_, 2) +
             std::pow(ev.y - last_click_y_, 2));
 
-        if (since_last < DOUBLE_CLICK_MAX_INTERVAL &&
-            click_dist < DOUBLE_CLICK_MAX_DISTANCE &&
-            ev.button_name == last_click_button_) {
-            type = ActionType::DOUBLE_CLICK;
+        bool continues = pending_click_.active &&
+                         since_last < DOUBLE_CLICK_MAX_INTERVAL &&
+                         click_dist < DOUBLE_CLICK_MAX_DISTANCE &&
+                         ev.button_name == last_click_button_;
+
+        if (continues) {
+            type = (click_count_ >= 2) ? ActionType::TRIPLE_CLICK
+                                       : ActionType::DOUBLE_CLICK;
         } else {
             type = ActionType::CLICK;
         }
         action_x = ev.x;
         action_y = ev.y;
-
-        last_click_ts_ = ev.timestamp_sec;
-        last_click_x_ = ev.x;
-        last_click_y_ = ev.y;
-        last_click_button_ = ev.button_name;
     }
 
     // Use the mouse-down timestamp as the event time for pre-frame lookup
@@ -323,25 +324,41 @@ void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
         return;
     }
 
-    // Handle double-click detection: suppress first click if second click arrives
-    if (type == ActionType::DOUBLE_CLICK) {
-        // This is the second click - discard the pending first click if it exists
-        if (pending_click_.active) {
+    // ── Double-/triple-click: promote the held click in place ──────
+    if (type == ActionType::DOUBLE_CLICK || type == ActionType::TRIPLE_CLICK) {
+        // The first click of the sequence is being held in pending_click_.
+        // Upgrade it (click → double → triple) and extend its timing so the
+        // post-frame is captured after the final click. A double-click stays
+        // held so a third click can still promote it; a triple-click is the
+        // deepest level we track, so flush it immediately.
+        PendingAction& held = pending_click_.action;
+        held.type = type;
+        held.release_ts = ev.timestamp_sec;
+        held.last_event_ts = ev.timestamp_sec;
+        held.required_post_ts = ev.timestamp_sec + POST_FRAME_OFFSET;
+        held.raw_events.push_back(down_ev);
+        held.raw_events.push_back(ev);
+        attach_keys_to_pending_locked(held, action_modifiers, ev.timestamp_sec);
+
+        click_count_++;
+        last_click_ts_ = ev.timestamp_sec;
+        last_click_x_ = ev.x;
+        last_click_y_ = ev.y;
+
+        if (type == ActionType::TRIPLE_CLICK) {
+            pending_.push_back(std::move(pending_click_.action));
             pending_click_.active = false;
+            click_count_ = 0;
+            last_click_ts_ = 0.0;
+            last_click_button_.clear();
         }
-        // Record the double-click immediately
-        auto pending = create_pending(type, event_ts, action_x, action_y,
-                                       ev.button_name);
-        pending.press_ts = state.down_ts;
-        pending.release_ts = ev.timestamp_sec;
-        pending.required_post_ts = ev.timestamp_sec + POST_FRAME_OFFSET;
-        pending.last_event_ts = ev.timestamp_sec;
-        pending.raw_events.push_back(down_ev);
-        pending.raw_events.push_back(ev);
-        attach_keys_to_pending_locked(pending, action_modifiers, ev.timestamp_sec);
-        pending_.push_back(std::move(pending));
-    } else if (type == ActionType::CLICK) {
-        // This is a potential first click - delay recording it
+        return;
+    }
+
+    if (type == ActionType::CLICK) {
+        // A fresh single click. Hold it until the double-click window elapses
+        // (check_pending_completions flushes it) or a follow-up click extends
+        // it into a double-/triple-click.
         auto pending = create_pending(type, event_ts, action_x, action_y,
                                        ev.button_name);
         pending.press_ts = state.down_ts;
@@ -352,17 +369,21 @@ void ActionEngine::handle_mouse_up(const RawInputEvent& ev) {
         pending.raw_events.push_back(ev);
         attach_keys_to_pending_locked(pending, action_modifiers, ev.timestamp_sec);
 
-        // If another non-double-click arrives before the previous click timeout
-        // has been processed, preserve the previous click instead of replacing it.
+        // A non-continuing click supersedes any still-held sequence: flush the
+        // previous one rather than dropping it.
         if (pending_click_.active) {
             pending_.push_back(std::move(pending_click_.action));
         }
 
-        // Store as pending click instead of adding to pending_ immediately
         pending_click_.active = true;
         pending_click_.action = std::move(pending);
+        click_count_ = 1;
+        last_click_ts_ = ev.timestamp_sec;
+        last_click_x_ = ev.x;
+        last_click_y_ = ev.y;
+        last_click_button_ = ev.button_name;
     } else {
-        // Drag or other action - record immediately
+        // Drag — record immediately.
         auto pending = create_pending(type, event_ts, action_x, action_y,
                                        ev.button_name);
         if (type == ActionType::DRAG) {
@@ -657,9 +678,13 @@ void ActionEngine::check_pending_completions() {
     if (pending_click_.active) {
         double time_since_click = now - pending_click_.action.release_ts;
         if (time_since_click >= DOUBLE_CLICK_MAX_INTERVAL) {
-            // Timeout expired - finalize the single click
+            // Window expired with no further click — finalize whatever the
+            // sequence became (single or double click).
             pending_.push_back(std::move(pending_click_.action));
             pending_click_.active = false;
+            click_count_ = 0;
+            last_click_ts_ = 0.0;
+            last_click_button_.clear();
         }
     }
 

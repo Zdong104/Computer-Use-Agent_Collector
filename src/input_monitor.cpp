@@ -16,6 +16,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -406,7 +407,14 @@ void InputMonitor::scan_devices() {
                         (libevdev_has_event_type(dev, EV_REL) &&
                          libevdev_has_event_code(dev, EV_REL, REL_X));
 
-        if (!is_keyboard && !is_mouse) {
+        // Touchpads are absolute multitouch devices: they never emit
+        // REL_WHEEL, so two-finger scroll must be reconstructed from the
+        // ABS_MT_* slot protocol instead.
+        bool is_touchpad = libevdev_has_event_type(dev, EV_ABS) &&
+                           libevdev_has_event_code(dev, EV_ABS, ABS_MT_SLOT) &&
+                           libevdev_has_event_code(dev, EV_ABS, ABS_MT_POSITION_Y);
+
+        if (!is_keyboard && !is_mouse && !is_touchpad) {
             libevdev_free(dev);
             close(fd);
             continue;
@@ -415,11 +423,20 @@ void InputMonitor::scan_devices() {
         const char* name = libevdev_get_name(dev);
         std::string dev_name = name ? name : "unknown";
 
-        devices_.push_back({fd, dev, is_keyboard, is_mouse, dev_name});
+        devices_.push_back({fd, dev, is_keyboard, is_mouse, dev_name, is_touchpad});
+
+        if (is_touchpad) {
+            // Emit one scroll notch per ~1.5mm of finger travel. Scale by
+            // the reported resolution (units/mm) so behaviour is consistent
+            // across touchpads with different coordinate ranges.
+            int res = libevdev_get_abs_resolution(dev, ABS_MT_POSITION_Y);
+            devices_.back().mt_scroll_threshold = (res > 0) ? res * 1.5 : 50.0;
+        }
 
         std::string kind;
         if (is_keyboard) kind += "kbd";
         if (is_mouse) kind += (kind.empty() ? "" : "+") + std::string("mouse");
+        if (is_touchpad) kind += (kind.empty() ? "" : "+") + std::string("touchpad");
         std::cerr << "[InputMonitor] Monitoring: " << dev_name
                   << " (" << kind << ")" << std::endl;
     }
@@ -453,11 +470,35 @@ void InputMonitor::process_event(DeviceInfo& dev, const ::input_event& ev) {
         // Mouse button events
         if (dev.is_mouse && (code == BTN_LEFT || code == BTN_RIGHT || code == BTN_MIDDLE)) {
             if (value == 0 || value == 1) {
+                std::string btn_name = button_to_name(code);
+
+                // Clickpads report every physical click as BTN_LEFT. libinput's
+                // default "clickfinger" behaviour maps a two-finger click to a
+                // right click and a three-finger click to a middle click;
+                // reproduce that here so touchpad right/middle clicks aren't
+                // silently recorded as left clicks.
+                if (dev.is_touchpad && code == BTN_LEFT) {
+                    if (value == 1) {
+                        int fingers = 0;
+                        for (int i = 0; i < MT_MAX_SLOTS; i++) {
+                            if (dev.mt_active[i]) fingers++;
+                        }
+                        if (fingers >= 3)      btn_name = "middle";
+                        else if (fingers == 2) btn_name = "right";
+                        else                   btn_name = "left";
+                        dev.mt_click_button = btn_name;
+                    } else if (!dev.mt_click_button.empty()) {
+                        // Release must match the button chosen at press time.
+                        btn_name = dev.mt_click_button;
+                        dev.mt_click_button.clear();
+                    }
+                }
+
                 RawInputEvent raw;
                 raw.type = (value == 1) ? RawEventType::MOUSE_BTN_DOWN : RawEventType::MOUSE_BTN_UP;
                 raw.timestamp_sec = monotonic_now();
                 raw.button = code;
-                raw.button_name = button_to_name(code);
+                raw.button_name = std::move(btn_name);
 
                 // Get cursor position
                 auto [cx, cy] = get_cursor_position();
@@ -515,6 +556,97 @@ void InputMonitor::process_event(DeviceInfo& dev, const ::input_event& ev) {
 
             push_event(std::move(raw));
         }
+    }
+    else if (ev.type == EV_ABS && dev.is_touchpad) {
+        handle_touchpad_abs(dev, ev);
+    }
+    else if (ev.type == EV_SYN && ev.code == SYN_REPORT && dev.is_touchpad) {
+        // A multitouch frame is complete — evaluate the two-finger gesture.
+        handle_touchpad_sync(dev);
+    }
+}
+
+// ─── Touchpad Two-Finger Scroll Reconstruction ────────────────
+
+void InputMonitor::handle_touchpad_abs(DeviceInfo& dev, const ::input_event& ev) {
+    switch (ev.code) {
+        case ABS_MT_SLOT:
+            if (ev.value >= 0 && ev.value < MT_MAX_SLOTS) {
+                dev.mt_slot = ev.value;
+            }
+            break;
+        case ABS_MT_TRACKING_ID: {
+            int s = dev.mt_slot;
+            if (s < 0 || s >= MT_MAX_SLOTS) break;
+            // >= 0 means a finger touched down in this slot; -1 means it lifted.
+            dev.mt_active[s] = (ev.value >= 0);
+            dev.mt_y_valid[s] = false;  // Await a fresh position before scrolling.
+            break;
+        }
+        case ABS_MT_POSITION_Y: {
+            int s = dev.mt_slot;
+            if (s < 0 || s >= MT_MAX_SLOTS) break;
+            dev.mt_y[s] = ev.value;
+            dev.mt_y_valid[s] = true;
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void InputMonitor::handle_touchpad_sync(DeviceInfo& dev) {
+    int active = 0;
+    int with_y = 0;
+    double sum_y = 0.0;
+    for (int i = 0; i < MT_MAX_SLOTS; i++) {
+        if (!dev.mt_active[i]) continue;
+        active++;
+        if (dev.mt_y_valid[i]) {
+            sum_y += dev.mt_y[i];
+            with_y++;
+        }
+    }
+
+    // Only two fingers resting on the pad counts as a scroll gesture.
+    if (active != 2 || with_y != 2) {
+        dev.mt_scroll_tracking = false;
+        dev.mt_scroll_accum = 0.0;
+        return;
+    }
+
+    double avg_y = sum_y / with_y;
+
+    if (!dev.mt_scroll_tracking) {
+        // First frame of the gesture: establish a baseline, emit nothing.
+        dev.mt_scroll_tracking = true;
+        dev.mt_prev_avg_y = avg_y;
+        dev.mt_scroll_accum = 0.0;
+        return;
+    }
+
+    double delta = avg_y - dev.mt_prev_avg_y;
+    dev.mt_prev_avg_y = avg_y;
+
+    // Touchpad Y grows downward. Fingers moving up (delta < 0) should scroll
+    // up, matching a mouse wheel's positive scroll_dy convention.
+    dev.mt_scroll_accum += -delta;
+
+    int guard = 0;
+    while (std::abs(dev.mt_scroll_accum) >= dev.mt_scroll_threshold && guard++ < 32) {
+        int dir = (dev.mt_scroll_accum > 0) ? 1 : -1;
+        dev.mt_scroll_accum -= dir * dev.mt_scroll_threshold;
+
+        RawInputEvent raw;
+        raw.type = RawEventType::SCROLL_EVENT;
+        raw.timestamp_sec = monotonic_now();
+        raw.scroll_dy = dir;
+
+        auto [cx, cy] = get_cursor_position();
+        raw.x = cx;
+        raw.y = cy;
+
+        push_event(std::move(raw));
     }
 }
 

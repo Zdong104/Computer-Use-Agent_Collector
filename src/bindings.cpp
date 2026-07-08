@@ -278,6 +278,7 @@ PYBIND11_MODULE(cua_capture, m) {
     py::enum_<cua::ActionType>(m, "ActionType")
         .value("CLICK", cua::ActionType::CLICK)
         .value("DOUBLE_CLICK", cua::ActionType::DOUBLE_CLICK)
+        .value("TRIPLE_CLICK", cua::ActionType::TRIPLE_CLICK)
         .value("DRAG", cua::ActionType::DRAG)
         .value("SCROLL", cua::ActionType::SCROLL)
         .value("HOTKEY", cua::ActionType::HOTKEY)

@@ -175,12 +175,33 @@ private:
     bool should_record_button(const std::string& button_name, bool is_down,
                               int x, int y);
 #else
+    static constexpr int MT_MAX_SLOTS = 10;
+
     struct DeviceInfo {
         int fd;
         ::libevdev* dev;
         bool is_keyboard;
         bool is_mouse;
         std::string name;
+        bool is_touchpad{false};
+
+        // ── Two-finger scroll gesture state (touchpads only) ──────
+        // Raw evdev touchpads report absolute multitouch, not wheel
+        // events, so we reconstruct the two-finger scroll gesture from
+        // the ABS_MT_* slot stream ourselves.
+        int    mt_slot{0};                     ///< Current ABS_MT_SLOT
+        bool   mt_active[MT_MAX_SLOTS]{};       ///< Finger present in slot
+        int    mt_y[MT_MAX_SLOTS]{};            ///< Last ABS_MT_POSITION_Y per slot
+        bool   mt_y_valid[MT_MAX_SLOTS]{};      ///< Y seen since finger down
+        bool   mt_scroll_tracking{false};       ///< Two-finger gesture in progress
+        double mt_prev_avg_y{0.0};              ///< Previous mean finger Y
+        double mt_scroll_accum{0.0};            ///< Sub-notch movement carry
+        double mt_scroll_threshold{50.0};       ///< Device units per scroll notch
+
+        // Clickpad button remap: every physical click reports BTN_LEFT, so we
+        // resolve left/right/middle from the finger count at press time and
+        // reuse it on release. Empty when no click is in progress.
+        std::string mt_click_button;
     };
     std::vector<DeviceInfo> devices_;
     int epoll_fd_{-1};
@@ -226,6 +247,9 @@ private:
     void monitor_loop();
 #ifndef _WIN32
     void process_event(DeviceInfo& dev, const ::input_event& ev);
+    // Two-finger touchpad scroll reconstruction from ABS_MT_* events.
+    void handle_touchpad_abs(DeviceInfo& dev, const ::input_event& ev);
+    void handle_touchpad_sync(DeviceInfo& dev);
 #endif
     void push_event(RawInputEvent&& ev);
 
