@@ -31,7 +31,9 @@ import urllib.error
 import agent_common as ac
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ac.load_env(SCRIPT_DIR / ".env")
+ENV_PATH = SCRIPT_DIR / ".env"
+PROVIDERS_PATH = SCRIPT_DIR / "providers.json"
+ac.load_env(ENV_PATH)
 
 PANEL_HOST = os.environ.get("PANEL_HOST", "127.0.0.1")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "8300"))
@@ -40,6 +42,143 @@ COLLECTOR_URL = os.environ.get("COLLECTOR_URL", "http://127.0.0.1:8321").rstrip(
 # In-memory job registries (process-lifetime only).
 LABEL_JOBS = {}          # job_id -> {state, title, done, total, msg, error}
 RUNS = {}                # run_title -> {proc, log}
+
+
+# ---------------------------------------------------------------------------
+# Model provider config (BASE_URL / MODEL / API_KEY)
+#
+# The GUI edits one or more provider profiles. The active profile is mirrored
+# into .env and os.environ so both labeling (in-process) and model runs
+# (subprocesses that inherit the environment) pick it up. The full list of
+# profiles lives in providers.json (git-ignored, holds the API keys).
+# ---------------------------------------------------------------------------
+
+CONFIG_KEYS = ("BASE_URL", "MODEL", "API_KEY")
+
+
+def load_providers() -> dict:
+    if PROVIDERS_PATH.exists():
+        try:
+            data = json.loads(PROVIDERS_PATH.read_text())
+            if isinstance(data, dict) and isinstance(data.get("profiles"), list):
+                return data
+        except Exception:
+            pass
+    return {"active": None, "profiles": []}
+
+
+def save_providers(data: dict) -> None:
+    PROVIDERS_PATH.write_text(json.dumps(data, indent=2))
+
+
+def _seed_from_env(data: dict) -> dict:
+    """First run: if there are no saved profiles but the .env already has
+    provider values, adopt them as the first profile so the GUI shows them."""
+    if data.get("profiles"):
+        return data
+    base_url = os.environ.get("BASE_URL", "")
+    model = os.environ.get("MODEL", "")
+    api_key = os.environ.get("API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+    if not (base_url or model or api_key):
+        return data
+    prof = {"id": uuid.uuid4().hex[:8], "base_url": base_url,
+            "model": model, "api_key": api_key}
+    data = {"active": prof["id"], "profiles": [prof]}
+    save_providers(data)
+    return data
+
+
+def _mask_key(key: str) -> str:
+    if not key:
+        return ""
+    if len(key) <= 6:
+        return "•" * len(key)
+    return key[:3] + "…" + key[-4:]
+
+
+def config_state() -> dict:
+    """Public view of saved providers with API keys masked (never sent raw)."""
+    data = _seed_from_env(load_providers())
+    profiles = data.get("profiles", [])
+    active = data.get("active")
+    if active is None and profiles:
+        active = profiles[0]["id"]
+    pub = [{"id": p["id"], "base_url": p.get("base_url", ""),
+            "model": p.get("model", ""), "has_key": bool(p.get("api_key")),
+            "key_hint": _mask_key(p.get("api_key", ""))} for p in profiles]
+    return {"active": active, "profiles": pub}
+
+
+def _apply_active(prof: dict) -> None:
+    """Mirror a profile into os.environ and .env so it takes effect immediately."""
+    os.environ["BASE_URL"] = prof.get("base_url", "")
+    os.environ["MODEL"] = prof.get("model", "")
+    os.environ["API_KEY"] = prof.get("api_key", "")
+    _write_env_file(prof)
+
+
+def _write_env_file(prof: dict) -> None:
+    """Rewrite .env, preserving any non-provider lines the user has there."""
+    lines = []
+    if ENV_PATH.exists():
+        for raw in ENV_PATH.read_text().splitlines():
+            key = raw.split("=", 1)[0].strip() if "=" in raw else ""
+            if key in CONFIG_KEYS:
+                continue
+            lines.append(raw)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines += [f"BASE_URL={prof.get('base_url', '')}",
+              f"MODEL={prof.get('model', '')}",
+              f"API_KEY={prof.get('api_key', '')}"]
+    ENV_PATH.write_text("\n".join(lines) + "\n")
+
+
+def save_config(body: dict) -> dict:
+    """Insert or update a provider profile, make it active, and apply it."""
+    data = _seed_from_env(load_providers())
+    profiles = data.get("profiles", [])
+    pid = body.get("id") or uuid.uuid4().hex[:8]
+    existing = next((p for p in profiles if p["id"] == pid), None)
+
+    base_url = (body.get("base_url") or "").strip()
+    model = (body.get("model") or "").strip()
+    # A blank key means "keep the existing one" (the GUI never shows raw keys).
+    api_key = body.get("api_key")
+    if not api_key:
+        api_key = existing.get("api_key", "") if existing else ""
+
+    prof = {"id": pid, "base_url": base_url, "model": model, "api_key": api_key}
+    profiles = [p for p in profiles if p["id"] != pid] + [prof]
+    data = {"active": pid, "profiles": profiles}
+    save_providers(data)
+    _apply_active(prof)
+    return config_state()
+
+
+def select_config(pid: str) -> dict:
+    """Make an existing profile the active one and apply it."""
+    data = _seed_from_env(load_providers())
+    prof = next((p for p in data.get("profiles", []) if p["id"] == pid), None)
+    if prof is None:
+        raise RuntimeError("unknown provider")
+    data["active"] = pid
+    save_providers(data)
+    _apply_active(prof)
+    return config_state()
+
+
+def delete_config(pid: str) -> dict:
+    data = _seed_from_env(load_providers())
+    profiles = [p for p in data.get("profiles", []) if p["id"] != pid]
+    active = data.get("active")
+    if active == pid:
+        active = profiles[0]["id"] if profiles else None
+    data = {"active": active, "profiles": profiles}
+    save_providers(data)
+    if active:
+        _apply_active(next(p for p in profiles if p["id"] == active))
+    return config_state()
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +355,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(html)
             return
+        if path == "/api/config":
+            self._json(config_state())
+            return
         if path == "/api/collector/status":
             try:
                 self._json(_collector("GET", "/api/status"))
@@ -249,6 +391,15 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         body = self._read_body()
         try:
+            if path == "/api/config/save":
+                self._json(save_config(body))
+                return
+            if path == "/api/config/select":
+                self._json(select_config(body.get("id", "")))
+                return
+            if path == "/api/config/delete":
+                self._json(delete_config(body.get("id", "")))
+                return
             if path == "/api/record/start":
                 desc = body.get("description", "Human demonstration")
                 self._json(_collector("POST", "/api/task/start", {"description": desc}))

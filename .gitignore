@@ -20,6 +20,9 @@ data_labeled/
 !assets/*.gif
 .codex
 .env
+# Saved model-provider profiles (contain API keys)
+providers.json
+Extension_AgentCollector/providers.json
 
 # Generated build trees
 build/

@@ -170,7 +170,30 @@
   <!-- RIGHT COLUMN -->
   <div id="right">
     <div class="card">
-      <h2>2 · Configure & run a task</h2>
+      <h2>2 · Model provider <span class="spacer"></span>
+        <button class="icon secondary" title="Add a new provider" onclick="newProvider()">＋ Add</button>
+      </h2>
+      <label>Saved providers</label>
+      <select id="providerSel"><option value="">— none saved —</option></select>
+      <label>API key</label>
+      <div class="row">
+        <input id="cfgKey" type="password" placeholder="sk-api" autocomplete="off" spellcheck="false">
+        <button type="button" id="cfgKeyToggle" class="secondary" title="Show / hide key"
+                style="flex:0 0 auto; width:auto">👁</button>
+      </div>
+      <label>Base URL</label>
+      <input id="cfgBase" placeholder="https://api.minimaxi.com/v1" autocomplete="off" spellcheck="false">
+      <label>Model</label>
+      <input id="cfgModel" placeholder="MiniMax-M3" autocomplete="off" spellcheck="false">
+      <div class="row" style="margin-top:12px">
+        <button id="cfgSave">Save</button>
+        <button id="cfgDelete" class="secondary" style="flex:0 0 auto; width:auto">Delete</button>
+      </div>
+      <div id="cfgHint" class="hint">Set the endpoint the agent should call.</div>
+    </div>
+
+    <div class="card">
+      <h2>3 · Configure & run a task</h2>
       <label>Task</label>
       <textarea id="task" placeholder="Describe the goal, e.g. Apply to jobs matching my ML background"></textarea>
       <label>Reference demo (guidance)</label>
@@ -370,6 +393,105 @@ function renderTrajectory(st) {
 function showDone() { $('#done-banner').classList.add('show'); setTimeout(hideDone, 4500); }
 function hideDone() { $('#done-banner').classList.remove('show'); }
 
+// ---- model provider config ----
+let providersCache = [];   // [{id, base_url, model, has_key, key_hint}]
+let editingId = '';        // '' => composing a new provider
+
+function currentProfile() { return providersCache.find(p => p.id === editingId) || null; }
+
+function renderProviders(active) {
+  const sel = $('#providerSel');
+  sel.innerHTML = '';
+  if (!providersCache.length) {
+    sel.innerHTML = '<option value="">— none saved —</option>';
+  } else {
+    for (const p of providersCache) {
+      const o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = `${p.model || '(no model)'} · ${p.base_url || '(no url)'}`;
+      sel.appendChild(o);
+    }
+  }
+  if (editingId) sel.value = editingId;
+  else sel.value = '';
+}
+
+function fillFields(p) {
+  $('#cfgBase').value = p ? (p.base_url || '') : '';
+  $('#cfgModel').value = p ? (p.model || '') : '';
+  $('#cfgKey').value = '';               // never populate the real key
+  $('#cfgKey').type = 'password';
+  $('#cfgDelete').disabled = !p;
+  if (p && p.has_key) $('#cfgHint').textContent = `A key is saved (${p.key_hint}). Leave blank to keep it.`;
+  else if (p) $('#cfgHint').textContent = 'No API key saved for this provider.';
+  else $('#cfgHint').textContent = 'New provider — fill in the fields and Save.';
+}
+
+async function loadConfig() {
+  let st;
+  try { st = await api('/api/config'); } catch (e) { return; }
+  providersCache = st.profiles || [];
+  editingId = st.active || (providersCache[0] && providersCache[0].id) || '';
+  renderProviders(st.active);
+  fillFields(currentProfile());
+}
+
+function newProvider() {
+  editingId = '';
+  renderProviders();
+  fillFields(null);
+  $('#cfgKey').focus();
+}
+
+$('#providerSel').onchange = async () => {
+  const id = $('#providerSel').value;
+  if (!id) { newProvider(); return; }
+  try {
+    const st = await api('/api/config/select', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+    providersCache = st.profiles || [];
+    editingId = id;
+    fillFields(currentProfile());
+  } catch (e) { $('#cfgHint').textContent = 'Error: ' + e; }
+};
+
+$('#cfgKeyToggle').onclick = () => {
+  const f = $('#cfgKey');
+  f.type = f.type === 'password' ? 'text' : 'password';
+};
+
+$('#cfgSave').onclick = async () => {
+  const base_url = $('#cfgBase').value.trim();
+  const model = $('#cfgModel').value.trim();
+  const api_key = $('#cfgKey').value;           // blank => keep existing
+  if (!base_url || !model) { $('#cfgHint').textContent = 'Base URL and Model are required.'; return; }
+  $('#cfgSave').disabled = true;
+  try {
+    const st = await post('/api/config/save', {id: editingId || undefined, base_url, model, api_key});
+    if (st.error) throw st.error;
+    providersCache = st.profiles || [];
+    editingId = st.active || editingId;
+    renderProviders(st.active);
+    fillFields(currentProfile());
+    $('#cfgHint').textContent = '✓ Saved & active.';
+  } catch (e) {
+    $('#cfgHint').textContent = 'Error: ' + e;
+  } finally { $('#cfgSave').disabled = false; }
+};
+
+$('#cfgDelete').onclick = async () => {
+  const p = currentProfile();
+  if (!p) return;
+  if (!confirm('Delete this provider?')) return;
+  try {
+    const st = await post('/api/config/delete', {id: p.id});
+    providersCache = st.profiles || [];
+    editingId = st.active || (providersCache[0] && providersCache[0].id) || '';
+    renderProviders(st.active);
+    fillFields(currentProfile());
+    $('#cfgHint').textContent = 'Provider deleted.';
+  } catch (e) { $('#cfgHint').textContent = 'Error: ' + e; }
+};
+
 // ---- splitter drag ----
 (() => {
   const sp = $('#splitter'), left = $('#left'); let dragging = false;
@@ -384,7 +506,7 @@ function hideDone() { $('#done-banner').classList.remove('show'); }
 })();
 
 // init
-refreshStatus(); loadDemos(); loadLabeled(); pollJobs();
+refreshStatus(); loadConfig(); loadDemos(); loadLabeled(); pollJobs();
 setInterval(refreshStatus, 3000);
 setInterval(pollJobs, 1200);
 </script>
