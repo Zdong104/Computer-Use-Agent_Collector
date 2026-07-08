@@ -8,7 +8,7 @@ Wayland input backend, and `run.sh` stay in the repository root.
 
 ```bash
 cd ..
-./run.sh --screen-index 3
+./run.sh
 ```
 
 The root collector starts screen capture, creates the Wayland `/dev/uinput`
@@ -24,7 +24,7 @@ MODEL=default
 COLLECTOR_URL=http://127.0.0.1:8321
 ```
 
-Then run:
+In another terminal, then run:
 
 ```bash
 cd Extension_AgentCollector
