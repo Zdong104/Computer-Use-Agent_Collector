@@ -4,6 +4,20 @@ This folder contains only the agent-side entrypoint and `.env` for
 OpenAI-compatible model control. The original collector, native capture engine,
 Wayland input backend, and `run.sh` stay in the repository root.
 
+## Prerequisite: Grant `/dev/uinput` Access
+
+The Wayland input backend injects clicks/keys through `/dev/uinput`, which is
+root-only by default. Without this the collector returns
+`HTTP 500: "/dev/uinput" cannot be opened for writing`. Run once (persists across
+reboots), then make sure your user is in the `input` group (`sudo usermod -aG
+input $USER` + re-login):
+
+```bash
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/99-uinput.rules
+echo uinput | sudo tee /etc/modules-load.d/uinput.conf
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
 ## Start The Collector
 
 ```bash
