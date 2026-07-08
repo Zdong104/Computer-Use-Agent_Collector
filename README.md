@@ -9,7 +9,16 @@ trajectories, and replays them through any OpenAI-compatible vision model. The
 project is designed to avoid platform lock-in, model lock-in, and closed data
 pipelines.
 
-![Demo](Demo.gif)
+<p align="center">
+  <img src="assets/agent_run_demo.gif" alt="A multimodal agent applying to a machine-learning job on LinkedIn — control panel on the left, real desktop on the right" width="100%">
+  <br>
+  <em>A multimodal agent applying to real ML jobs on LinkedIn — reference demo on the left, the live desktop on the right.</em>
+</p>
+
+> **🤝 Open to collaboration.** This is a community project — we want your demonstrations,
+> model adapters, platform backends, and ideas. Star the repo, open an issue to share
+> a direction, or send a PR. See [Contributing & Collaboration](#contributing--collaboration) and reach out at
+> **puma122707@gmail.com** to build the open CUA data stack together.
 
 ## Why This Project
 
@@ -56,9 +65,15 @@ CUA Collector is organized around three steps:
 ### 1. Record
 
 Start the collector, open the web panel, describe the task, then perform the task
-manually. The collector captures actions automatically while the task is active.
+manually. The collector captures actions automatically while the task is active —
+use it as a lightweight, always-on recorder for any desktop workflow.
 
-<!-- Insert image here: recording a human demonstration in the web panel -->
+<p align="center">
+  <img src="assets/recorder_demo.gif" alt="Using the collector purely as a recorder — captured actions stream into the terminal while a real task runs on the desktop" width="100%">
+  <br>
+  <em>Just press <code>Ctrl+F8</code> and work: every click and keystroke is captured to
+  <code>data/&lt;task_id&gt;/</code> alongside pre/post screenshots.</em>
+</p>
 
 ### 2. Label
 
@@ -78,7 +93,12 @@ structured action at a time.
 Each run is saved as `data_labeled/BOT_<TITLE>/`, so successful agent behavior
 can become training or guidance data for future runs.
 
-<!-- Insert image here: replaying/running a task with a reference trajectory -->
+<p align="center">
+  <img src="assets/agent_run_demo.gif" alt="Replaying the LinkedIn apply task: the model reads the screen and returns one structured action at a time while the live trajectory fills in" width="100%">
+  <br>
+  <em>Pick a labeled reference (here, <code>APPLY_MACHINE_LEARNING_WORK</code>), give a task,
+  and watch the model drive the real desktop one action at a time.</em>
+</p>
 
 ## Web Control Panel
 
@@ -89,9 +109,7 @@ The recommended interface is the local web control panel:
 - **Right side:** the real desktop environment where the task is executed.
 
 This layout makes it easy to supervise an agent while seeing both its decisions
-and the actual UI operations.
-
-<!-- Insert image here: left web panel, right desktop execution -->
+and the actual UI operations — as shown in the demo at the [top of this page](#computer-use-agent-behavior-cloning-collect-and-replay).
 
 ## Quick Start
 
@@ -322,19 +340,37 @@ The agent extension handles:
 └── data_labeled/                   # labeled references and bot runs
 ```
 
-## Contributing
+## Contributing & Collaboration
 
-Contributions are welcome. Useful areas include:
+**We are actively looking for collaborators.** CUA Collector is meant to be a shared,
+open foundation for computer-use agent research, and it gets better with every
+demonstration, adapter, and idea the community brings.
 
-- new platform backends
-- model adapter examples
-- better labeling prompts and schemas
-- dataset tools and validators
-- replay evaluation metrics
-- documentation and demo trajectories
+Ways to get involved:
+
+- ⭐ **Star and watch** the repo to follow progress.
+- 💡 **Share an idea or direction** by opening an
+  [issue](https://github.com/Zdong104/Computer-Use-Agent_Collector/issues) or a
+  discussion — early feedback shapes the roadmap.
+- 🔧 **Send a pull request.** High-value areas include:
+  - new platform backends
+  - model adapter examples
+  - better labeling prompts and schemas
+  - dataset tools and validators
+  - replay evaluation metrics
+  - documentation and demo trajectories
+- 📬 **Reach out directly** at **puma122707@gmail.com** to collaborate on research,
+  datasets, or integrations.
 
 The goal is to make computer-use data collection and replay reproducible,
-inspectable, and open.
+inspectable, and open — and to build it together.
+
+## More Demos
+
+Longer end-to-end screen recordings of the collector in action:
+
+- [`assets/Demo.gif`](assets/Demo.gif) — full Linux Wayland session
+- [`assets/WindowsDemo.gif`](assets/WindowsDemo.gif) — Windows session
 
 ## Citation
 

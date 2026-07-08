@@ -15,6 +15,9 @@ data/
 data_labeled/
 *.mp4
 *.gif
+# README demo GIFs are tracked on purpose
+!assets/
+!assets/*.gif
 .codex
 .env
 
