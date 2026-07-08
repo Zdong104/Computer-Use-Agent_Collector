@@ -9,6 +9,11 @@ trajectories, and replays them through any OpenAI-compatible vision model. The
 project is designed to avoid platform lock-in, model lock-in, and closed data
 pipelines.
 
+**🔌 Bring your own model.** You are no longer limited to Codex or Claude. Point
+the collector at any OpenAI-compatible vision endpoint — a hosted API, a local
+server, or your own gateway — right from the web panel. Add your `BASE_URL`,
+`MODEL`, and `API_KEY`, save, and switch between providers from a dropdown.
+
 <p align="center">
   <img src="assets/agent_run_demo.gif" alt="A multimodal agent applying to a machine-learning job on LinkedIn — control panel on the left, real desktop on the right" width="100%">
   <br>
@@ -29,11 +34,20 @@ computer-use behavior data. Researchers, builders, and agent developers can use
 the same pipeline to contribute demonstrations, compare models, label tasks, and
 turn successful agent runs into future references.
 
-### Multimodal Model Support
+### Bring Your Own Model
 
-CUA Collector talks to vision-capable models through an OpenAI-compatible API.
-You can point it at local servers, hosted endpoints, or custom model gateways by
-changing `BASE_URL`, `MODEL`, and `API_KEY`.
+**Not limited to Codex or Claude anymore.** CUA Collector talks to any
+vision-capable model through an OpenAI-compatible API, so you can run it on the
+model *you* choose — a frontier hosted API, an open-weight model behind vLLM /
+Ollama / LM Studio, or your own custom gateway.
+
+Configure it two ways:
+
+- **From the web panel (recommended):** the **Model provider** card lets you add
+  a provider (`BASE_URL`, `MODEL`, `API_KEY`), save it, and switch between saved
+  providers from a dropdown. Keys are stored locally and shown masked.
+- **From a file:** set `BASE_URL`, `MODEL`, and `API_KEY` in
+  `Extension_AgentCollector/.env`.
 
 The agent loop sends the current screenshot plus text trajectory memory, receives
 a structured next action, executes it, and records the result.
@@ -104,8 +118,8 @@ can become training or guidance data for future runs.
 
 The recommended interface is the local web control panel:
 
-- **Left side:** agent control panel for recording, labeling, references, memory,
-  step budget, and live trajectory.
+- **Left side:** agent control panel for choosing your model provider, recording,
+  labeling, references, memory, step budget, and live trajectory.
 - **Right side:** the real desktop environment where the task is executed.
 
 This layout makes it easy to supervise an agent while seeing both its decisions
@@ -143,7 +157,23 @@ The collector exposes its local control API at `http://127.0.0.1:8321`.
 
 ### Configure A Model
 
-Edit `Extension_AgentCollector/.env`:
+**Bring your own model — you are not tied to Codex or Claude.** Any
+OpenAI-compatible vision endpoint works.
+
+The easiest way is directly in the web panel: open the **Model provider** card,
+fill in your API key, base URL, and model, then click **Save**. Configurations
+are written to a local `.env` for you, and you can keep several providers and
+switch between them from the dropdown (keys stay hidden).
+
+For example:
+
+```text
+API_KEY=sk-api
+BASE_URL=https://api.minimaxi.com/v1
+MODEL=MiniMax-M3
+```
+
+Prefer a file? Edit `Extension_AgentCollector/.env` directly:
 
 ```bash
 BASE_URL=http://localhost:8000/v1
@@ -151,8 +181,6 @@ MODEL=default
 API_KEY=
 COLLECTOR_URL=http://127.0.0.1:8321
 ```
-
-Any OpenAI-compatible vision endpoint can be used.
 
 ### Linux X11
 
@@ -379,7 +407,7 @@ Longer end-to-end screen recordings of the collector in action:
   author = {Zihan Dong},
   title = {ComputerUseAgent\_Collector},
   year = {2026},
-  url = {https://github.com/Zdong104/Computer-Use-Agent_Collector},
+  url = {https://github.com/Zdong104/Computer-Use-Agent_Behavior_Clone},
   note = {Computer Use Agent behavior cloning: collect and replay}
 }
 ```
