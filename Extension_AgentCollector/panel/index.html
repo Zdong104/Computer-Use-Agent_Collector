@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CUA Agent Control Panel</title>
+<style>
+  :root {
+    --bg: #0e1117; --panel: #161b22; --panel2: #1c2330; --border: #2a3140;
+    --text: #e6edf3; --muted: #8b949e; --accent: #388bfd; --green: #2ea043;
+    --green-glow: #3fb950; --amber: #d29922; --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 14px;
+    padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .dot.on { background: var(--green-glow); box-shadow: 0 0 6px var(--green-glow); }
+  .dot.off { background: var(--red); }
+  .pill { font-size: 12px; color: var(--muted); }
+
+  /* Split layout: left column | draggable splitter | right column */
+  main { flex: 1 1 auto; display: flex; min-height: 0; padding: 14px; }
+  #left {
+    flex: 0 0 380px; width: 380px; display: flex; flex-direction: column; gap: 14px;
+    min-height: 0; overflow: hidden;
+  }
+  #splitter {
+    flex: 0 0 10px; cursor: col-resize; position: relative; align-self: stretch;
+  }
+  #splitter::before {
+    content: ''; position: absolute; left: 4px; top: 0; bottom: 0; width: 2px;
+    background: var(--border); border-radius: 2px;
+  }
+  #splitter:hover::before, #splitter.drag::before { background: var(--accent); }
+  #right {
+    flex: 1 1 auto; display: flex; flex-direction: column; gap: 14px;
+    min-height: 0; overflow: hidden; min-width: 0;
+  }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card.grow { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .spacer { flex: 1; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, textarea, select, button {
+    font: inherit; color: var(--text); background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; width: 100%;
+  }
+  textarea { resize: vertical; min-height: 70px; }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; min-width: 0; }
+  button {
+    cursor: pointer; background: var(--accent); border-color: transparent; color: #fff;
+    font-weight: 600; transition: filter .15s, background .15s, color .15s, border-color .15s;
+  }
+  button:hover { filter: brightness(1.1); }
+  button.secondary { background: var(--panel2); color: var(--text); border-color: var(--border); }
+  button.danger { background: var(--red); }
+  button.small { width: auto; padding: 5px 10px; font-size: 12px; white-space: nowrap; }
+  button.icon { width: auto; padding: 4px 9px; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  .list { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  .item {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; margin-bottom: 6px;
+    background: var(--panel2);
+  }
+  .item .meta { min-width: 0; flex: 1; }
+  .item .meta b { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .meta span { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+
+  /* Label / Labeling / Labeled button states */
+  button.labeling { background: var(--panel2); color: var(--amber); border-color: var(--amber); }
+  button.labeling::before { content: attr(data-progress); }
+  button.labeling:hover { background: var(--red); color: #fff; border-color: var(--red); filter: none; }
+  button.labeling:hover::before { content: '■ Stop'; }
+  button.labeled { background: rgba(46,160,67,.14); color: var(--green-glow); border-color: var(--green-glow); }
+  button.labeled::before { content: '✓ Labeled'; }
+  button.labeled:hover::before { content: '↻ Re-label'; }
+
+  .traj { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  .step {
+    border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 7px; padding: 8px 10px; margin-bottom: 8px; background: var(--panel2);
+  }
+  .step .n { color: var(--muted); font-size: 11px; }
+  .step .desc { margin: 2px 0 4px; }
+  .step .act { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    color: var(--green-glow); overflow-wrap: anywhere; }
+  .step .exp { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .errbox { border: 1px solid var(--red); background: rgba(248,81,73,.08); color: var(--text);
+    border-radius: 7px; padding: 8px 10px; margin-bottom: 8px; font-size: 12px; }
+  .errbox b { color: var(--red); }
+  .errbox pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+  .badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--border); color: var(--muted); }
+  .badge.run { color: var(--amber); border-color: var(--amber); }
+  .badge.done { color: var(--green-glow); border-color: var(--green-glow); }
+  .badge.failed { color: var(--red); border-color: var(--red); }
+
+  /* Responsive: stack vertically — 1 (record) top, demos middle, 2 (config) bottom */
+  @media (max-width: 820px) {
+    main { flex-direction: column; overflow-y: auto; }
+    #left, #right { flex: none; width: auto !important; overflow: visible; }
+    #splitter { display: none; }
+    .card.grow { flex: none; }
+    .list { max-height: 44vh; }
+    .traj { max-height: 60vh; }
+  }
+
+  /* DONE emerge effect */
+  #done-banner {
+    position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 140%);
+    background: linear-gradient(135deg, var(--green), var(--green-glow));
+    color: #04160a; font-weight: 700; font-size: 16px; letter-spacing: .02em;
+    padding: 14px 30px; border-radius: 40px; box-shadow: 0 8px 30px rgba(46,160,67,.5);
+    opacity: 0; pointer-events: none; transition: transform .5s cubic-bezier(.2,.9,.3,1.2), opacity .5s;
+    z-index: 50;
+  }
+  #done-banner.show { transform: translate(-50%, 0); opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <span id="statusDot" class="dot off"></span>
+  <h1>CUA Agent Control Panel</h1>
+  <span id="statusText" class="pill">connecting…</span>
+</header>
+
+<main>
+  <!-- LEFT COLUMN -->
+  <div id="left">
+    <div class="card">
+      <h2>1 · Record a human demo</h2>
+      <label>What is this demonstration?</label>
+      <input id="recDesc" placeholder="e.g. Apply to an ML job on LinkedIn">
+      <div class="row" style="margin-top:10px">
+        <button id="recStart">● Start recording</button>
+        <button id="recStop" class="danger">■ Stop</button>
+      </div>
+      <div id="recHint" class="hint">Perform the task manually, then press Stop.</div>
+    </div>
+
+    <div class="card grow">
+      <h2>Recorded demos <span class="spacer"></span>
+        <button class="icon secondary" title="Refresh list & progress" onclick="refreshAll()">↻</button>
+      </h2>
+      <div id="demos" class="list"></div>
+    </div>
+  </div>
+
+  <!-- DRAGGABLE SPLITTER -->
+  <div id="splitter" title="Drag to resize"></div>
+
+  <!-- RIGHT COLUMN -->
+  <div id="right">
+    <div class="card">
+      <h2>2 · Configure & run a task</h2>
+      <label>Task</label>
+      <textarea id="task" placeholder="Describe the goal, e.g. Apply to jobs matching my ML background"></textarea>
+      <label>Reference demo (guidance)</label>
+      <select id="reference"><option value="">— none —</option></select>
+      <div class="row">
+        <div>
+          <label>Trajectory memory (steps n)</label>
+          <input id="lookback" type="number" min="0" value="10">
+        </div>
+        <div>
+          <label>Max work steps (budget)</label>
+          <input id="maxSteps" type="number" min="1" value="20">
+        </div>
+      </div>
+      <button id="startRun" style="margin-top:12px">▶ Start task</button>
+      <div id="runHint" class="hint"></div>
+    </div>
+
+    <div class="card grow">
+      <h2>Live trajectory <span id="runBadge" class="badge">idle</span></h2>
+      <div id="traj" class="traj"><div class="hint">No run yet.</div></div>
+    </div>
+  </div>
+</main>
+
+<div id="done-banner">✓ DONE</div>
+
+<script>
+const $ = s => document.querySelector(s);
+async function api(path, opts) { const r = await fetch(path, opts); return r.json(); }
+async function post(path, body) {
+  return api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ---- shared client state ----
+let demosCache = [];
+let labeledByTask = {};   // source_task_id -> title
+let jobsByTask = {};      // task_id -> {job_id, state, done, total}
+
+// ---- collector status ----
+async function refreshStatus() {
+  try {
+    const s = await api('/api/collector/status');
+    const online = !s.error;
+    $('#statusDot').className = 'dot ' + (online ? 'on' : 'off');
+    if (!online) { $('#statusText').textContent = 'collector offline (start ./run.sh)'; return; }
+    const cs = s.capture_screen ? `screen #${s.capture_screen.index} ${s.capture_screen.width}×${s.capture_screen.height}` : 'no screen';
+    $('#statusText').textContent = (s.task_active ? `recording · ${s.num_actions} actions` : 'idle') + ' · ' + cs;
+  } catch (e) {
+    $('#statusDot').className = 'dot off';
+    $('#statusText').textContent = 'panel error';
+  }
+}
+
+// ---- demos + labeling ----
+async function loadDemos() {
+  const {demos} = await api('/api/demos');
+  demosCache = demos || [];
+  renderDemos();
+}
+
+function renderDemos() {
+  const el = $('#demos'); el.innerHTML = '';
+  if (!demosCache.length) { el.innerHTML = '<div class="hint">No recordings with actions yet.</div>'; return; }
+  for (const d of demosCache.slice(0, 100)) {
+    const row = document.createElement('div'); row.className = 'item';
+    row.innerHTML = `<div class="meta"><b>${escapeHtml(d.description||d.task_id)}</b>
+      <span>${d.num_actions} actions · ${d.task_id}</span></div>`;
+    row.appendChild(demoButton(d));
+    el.appendChild(row);
+  }
+}
+
+function demoButton(d) {
+  const b = document.createElement('button'); b.className = 'small';
+  const job = jobsByTask[d.task_id];
+  if (job && job.state === 'running') {
+    b.className = 'small labeling';
+    b.dataset.progress = job.total ? `Labeling ${job.done}/${job.total}` : 'Labeling…';
+    b.title = 'Click to stop labeling';
+    b.onclick = () => cancelLabel(job.job_id);
+  } else if (labeledByTask[d.task_id]) {
+    b.className = 'small labeled';
+    b.title = 'Labeled — click to re-label';
+    b.onclick = () => startLabel(d.task_id, true);
+  } else {
+    b.className = 'small secondary';
+    b.textContent = 'Label';
+    b.onclick = () => startLabel(d.task_id, false);
+  }
+  return b;
+}
+
+async function startLabel(taskId, force) {
+  if (force && !confirm('Re-label this demo? This overwrites the existing reference.')) return;
+  await post('/api/label', {task_id: taskId, force: !!force});
+  await pollJobs();   // reflect progress immediately
+}
+async function cancelLabel(jobId) {
+  await post('/api/label/cancel', {job_id: jobId});
+  await pollJobs();
+}
+
+// Single global poller: keeps demo buttons in sync with server-side jobs.
+// Refreshing the list never cancels a job (jobs live on the server).
+async function pollJobs() {
+  let jobs = {};
+  try { jobs = (await api('/api/jobs')).jobs || {}; } catch (e) { return; }
+  const prev = jobsByTask; jobsByTask = jobs;
+  let finished = false;
+  for (const t in jobs) {
+    if (jobs[t].state !== 'running' && (!prev[t] || prev[t].state === 'running')) finished = true;
+  }
+  if (finished) await loadLabeled();
+  renderDemos();
+}
+
+// ---- references ----
+async function loadLabeled() {
+  const {labeled} = await api('/api/labeled');
+  labeledByTask = {};
+  for (const e of labeled) if (e.source_task_id) labeledByTask[e.source_task_id] = e.title;
+  const sel = $('#reference'); const cur = sel.value;
+  sel.innerHTML = '<option value="">— none —</option>';
+  for (const e of labeled) {
+    const o = document.createElement('option');
+    o.value = e.title;
+    o.textContent = `${e.title} (${e.kind}, ${e.num_steps} steps)`;
+    sel.appendChild(o);
+  }
+  sel.value = cur;
+  renderDemos();
+}
+
+function refreshAll() { loadDemos(); loadLabeled(); pollJobs(); }
+
+// ---- recording ----
+$('#recStart').onclick = async () => {
+  const r = await post('/api/record/start', {description: $('#recDesc').value || 'Human demonstration'});
+  $('#recHint').textContent = r.error ? ('Error: ' + r.error) : `Recording started (${r.task_id||''}). Do the task, then Stop.`;
+};
+$('#recStop').onclick = async () => {
+  const r = await post('/api/record/stop', {});
+  $('#recHint').textContent = r.error ? ('Error: ' + r.error) : 'Recording stopped & saved.';
+  setTimeout(loadDemos, 800);
+};
+
+// ---- run ----
+let runPoll = null;
+$('#startRun').onclick = async () => {
+  const task = $('#task').value.trim();
+  if (!task) { alert('Enter a task first.'); return; }
+  hideDone(); $('#startRun').disabled = true;
+  const r = await post('/api/run', {
+    task, reference_title: $('#reference').value,
+    lookback: parseInt($('#lookback').value || '10'),
+    max_steps: parseInt($('#maxSteps').value || '20'),
+  });
+  if (r.error) { $('#startRun').disabled = false; alert(r.error); return; }
+  $('#runHint').textContent = 'Running as ' + r.run_title;
+  watchRun(r.run_title);
+};
+function watchRun(title) {
+  if (runPoll) clearInterval(runPoll);
+  runPoll = setInterval(async () => {
+    const st = await api('/api/run/' + title);
+    renderTrajectory(st);
+    if (['done','failed','stopped'].includes(st.status)) {
+      clearInterval(runPoll); runPoll = null; $('#startRun').disabled = false;
+      if (st.status === 'done') showDone();
+    }
+  }, 1000);
+}
+function renderTrajectory(st) {
+  const badge = $('#runBadge');
+  badge.className = 'badge ' + (st.status === 'done' ? 'done' : st.status === 'running' ? 'run' : st.status === 'failed' ? 'failed' : '');
+  badge.textContent = st.status;
+  const steps = (st.trajectory && st.trajectory.actions) || [];
+  const el = $('#traj');
+  const errMsg = st.error || (st.trajectory && st.trajectory.error) || '';
+  const errBlock = (st.status === 'failed' && errMsg)
+    ? `<div class="errbox"><b>Run failed:</b><pre>${escapeHtml(errMsg)}</pre></div>` : '';
+  if (!steps.length) {
+    el.innerHTML = errBlock || '<div class="hint">Waiting for first step…</div>';
+    return;
+  }
+  el.innerHTML = errBlock + steps.map(s => `
+    <div class="step">
+      <div class="n">Step ${s.step || s.sequence_number}</div>
+      <div class="desc">${escapeHtml(s.description||'')}</div>
+      <div class="act">${escapeHtml(s.action||'')}</div>
+      ${s.expected ? `<div class="exp">→ ${escapeHtml(s.expected)}</div>` : ''}
+    </div>`).join('');
+  el.scrollTop = el.scrollHeight;
+}
+function showDone() { $('#done-banner').classList.add('show'); setTimeout(hideDone, 4500); }
+function hideDone() { $('#done-banner').classList.remove('show'); }
+
+// ---- splitter drag ----
+(() => {
+  const sp = $('#splitter'), left = $('#left'); let dragging = false;
+  sp.addEventListener('mousedown', e => { dragging = true; sp.classList.add('drag'); document.body.style.userSelect = 'none'; e.preventDefault(); });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const min = 280, max = Math.max(min, window.innerWidth * 0.6);
+    const w = Math.min(max, Math.max(min, e.clientX - left.getBoundingClientRect().left));
+    left.style.flexBasis = w + 'px'; left.style.width = w + 'px';
+  });
+  window.addEventListener('mouseup', () => { dragging = false; sp.classList.remove('drag'); document.body.style.userSelect = ''; });
+})();
+
+// init
+refreshStatus(); loadDemos(); loadLabeled(); pollJobs();
+setInterval(refreshStatus, 3000);
+setInterval(pollJobs, 1200);
+</script>
+</body>
+</html>

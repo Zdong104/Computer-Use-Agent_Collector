@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "control-panel",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["Extension_AgentCollector/control_panel.py"],
+      "port": 8300
+    }
+  ]
+}
