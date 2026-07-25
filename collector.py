@@ -30,11 +30,13 @@ Requirements:
 """
 
 import os
+import re
 import sys
 import json
 import time
 import uuid
 import threading
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
@@ -129,6 +131,11 @@ class ActionRecord:
     session_type: str
     screen_resolution: Tuple[int, int]
     pre_degraded: bool = False
+    # The capture frame the coords above live in, and the same coords
+    # normalized to [0,1] — replayable on any screen size by multiplying
+    # with the live frame (norm_x * live_w, norm_y * live_h).
+    frame_size: Tuple[int, int] = (0, 0)
+    norm_coords: Tuple[float, float] = (0.0, 0.0)
 
 
 @dataclass
@@ -141,6 +148,9 @@ class TaskRecord:
     session_type: str
     screen_resolution: Tuple[int, int]
     actions: List[dict] = field(default_factory=list)
+    # The capture frame the task's screenshots/coords are in (may differ from
+    # screen_resolution on scaled displays, e.g. 4K monitor -> 1920x1080 frame).
+    capture_frame: Tuple[int, int] = (0, 0)
 
 
 @dataclass
@@ -916,6 +926,16 @@ class CollectorV2:
             self.resolution = (self.capture_screen.width, self.capture_screen.height)
         else:
             self.resolution = (max_width, max_height)
+        # The CAPTURE FRAME: the (w, h) every saved screenshot has and the
+        # coordinate space /api/action reads pixel coordinates in. It can be
+        # smaller than the monitor (e.g. PipeWire streams a 3840x2160 monitor
+        # at its 1920x1080 logical size). Starts as the best guess and is
+        # corrected from the portal's logical size and from real frames.
+        self.frame_size = self.resolution
+        # The selected screen's rect in GLOBAL LOGICAL desktop coordinates
+        # (portal geometry on Wayland; mss logical rect elsewhere). Used to
+        # decide whether the pointer is on the captured screen at all.
+        self.portal_rect: Optional[Tuple[int, int, int, int]] = None
 
         # C++ capture engine
         self.engine = cua_capture.CaptureEngine(
@@ -1021,6 +1041,21 @@ class CollectorV2:
                 self.capture_screen = choose_capture_screen(self._screen_index)
                 if self.capture_screen is not None:
                     self.resolution = (self.capture_screen.width, self.capture_screen.height)
+            # PipeWire negotiates the stream at the portal's LOGICAL size (a
+            # scale-2 4K monitor streams at 1920x1080), so that logical size is
+            # the capture frame — for any monitor/scale, not just 3840x2160.
+            # The full logical rect (position + size) also identifies WHICH
+            # screen was selected: it is the containment test used to reject
+            # input that happens on a different monitor.
+            try:
+                px, py = int(self.engine.portal_position_x), int(self.engine.portal_position_y)
+                pw, ph = int(self.engine.portal_size_w), int(self.engine.portal_size_h)
+                if pw > 0 and ph > 0:
+                    self.frame_size = (pw, ph)
+                    if px >= 0 and py >= 0:
+                        self.portal_rect = (px, py, pw, ph)
+            except Exception:
+                pass
 
         # Setup WaylandInputController now that the selected screen is known, so
         # the uinput virtual devices exist when the C++ engine scans /dev/input
@@ -1028,9 +1063,10 @@ class CollectorV2:
         self.wayland_ctrl = None
         if SESSION_TYPE == 'wayland-gnome' and WaylandInputController is not None and self.capture_screen is not None:
             monitor = self.capture_screen
-            frame_w, frame_h = self.resolution
-            if monitor.width == 3840 and monitor.height == 2160:
-                frame_w, frame_h = 1920, 1080
+            # frame_size comes from the portal's logical size above, so the
+            # injection frame matches the capture frame on any monitor/scale
+            # (previously a hardcoded 3840x2160 -> 1920x1080 special case).
+            frame_w, frame_h = self.frame_size
             print("🎮 Initializing Wayland Input Controller at startup...")
             try:
                 self.wayland_ctrl = WaylandInputController(
@@ -1128,10 +1164,11 @@ class CollectorV2:
                 end_time=None,
                 os_name=OS_NAME, session_type=SESSION_TYPE,
                 screen_resolution=self.resolution,
+                capture_frame=self.frame_size,
             )
             self.data_store.create_task_dir(tid)
             self.seq = 0
-            
+
             # Drain any stale actions accumulated during IDLE state
             while self.engine.pop_action() is not None:
                 pass
@@ -1207,6 +1244,16 @@ class CollectorV2:
 
     def _handle_completed_action(self, action):
         """Process a completed action from the C++ engine."""
+        if self._off_capture_screen(action):
+            # The pointer was on a DIFFERENT monitor: the user was interacting
+            # with a screen we are not capturing, so neither the mouse action
+            # nor the keys typed there belong in this recording. Recording
+            # them would poison replay with out-of-frame coordinates.
+            print(f"   🚫 Ignored {action.type} @ ({action.x},{action.y}): "
+                  f"pointer is outside the captured screen "
+                  f"(frame {self.frame_size[0]}x{self.frame_size[1]})")
+            return
+
         with self._lock:
             if not self.current_task:
                 return
@@ -1226,8 +1273,10 @@ class CollectorV2:
                 self._save_rgb_as_png,
                 action.pre_frame_rgb, action.pre_w, action.pre_h, pre_path
             )
-            # Update resolution from actual frame size
+            # Update resolution + capture frame from the actual frame size:
+            # a really-captured frame is the ground truth for both.
             self.resolution = (action.pre_w, action.pre_h)
+            self.frame_size = (action.pre_w, action.pre_h)
 
         if action.post_frame_rgb and action.post_w > 0:
             self._io_pool.submit(
@@ -1258,6 +1307,17 @@ class CollectorV2:
                 'delta_time': self._duration_ms(press_ts, release_ts),
             })
 
+        # Normalize against the frame this action's screenshots actually have;
+        # fall back to the tracked capture frame before the first saved frame.
+        if action.pre_frame_rgb and action.pre_w > 0:
+            fw, fh = action.pre_w, action.pre_h
+        else:
+            fw, fh = self.frame_size
+        fw, fh = max(1, int(fw)), max(1, int(fh))
+
+        def _norm(x, y):
+            return (round(x / fw, 6), round(y / fh, 6))
+
         mouse_list = []
         if action.button_name:
             press_ts = action.press_ts if getattr(action, 'press_ts', 0) > 0 else action.event_ts
@@ -1271,6 +1331,12 @@ class CollectorV2:
                 'release_coords': (
                     action.release_x, action.release_y
                 ) if is_drag else (action.x, action.y),
+                'press_coords_norm': _norm(
+                    action.press_x, action.press_y
+                ) if is_drag else _norm(action.x, action.y),
+                'release_coords_norm': _norm(
+                    action.release_x, action.release_y
+                ) if is_drag else _norm(action.x, action.y),
                 'press_time': self._mono_to_iso(press_ts),
                 'release_time': self._mono_to_iso(release_ts),
                 'delta_time': self._duration_ms(press_ts, release_ts),
@@ -1314,6 +1380,8 @@ class CollectorV2:
                 session_type=SESSION_TYPE,
                 screen_resolution=self.resolution,
                 pre_degraded=action.pre_degraded,
+                frame_size=(fw, fh),
+                norm_coords=_norm(action.x, action.y),
             )
             self.current_task.actions.append(asdict(rec))
 
@@ -1344,6 +1412,93 @@ class CollectorV2:
 
         status = "⚠️ degraded" if action.pre_degraded else "✓"
         print(f"   ✅ Action #{seq}: {operation_summary} @ ({action.x},{action.y}) [{status}]")
+
+    # Edge clicks legitimately land ON the boundary; only clearly-outside
+    # coordinates mean "the pointer was on another monitor".
+    _OFFSCREEN_SLACK_PX = 2
+
+    def _off_capture_screen(self, action) -> bool:
+        """True when this action happened on a monitor we are NOT capturing.
+
+        Primary test — SCREEN IDENTITY, not coordinate range: the cursor
+        tracker reports coordinates relative to whichever monitor the pointer
+        is on (display.get_current_monitor()), so a click on another screen
+        can look perfectly in-bounds. The only reliable signal is the global
+        pointer position checked for containment in the SELECTED screen's
+        global logical rect (the portal geometry).
+
+        Fallback — when the global pointer cannot be read: out-of-frame
+        coordinates still prove the pointer was elsewhere (they catch clicks
+        on monitors larger than the frame, and nothing else).
+        """
+        on_screen = self._pointer_on_selected_screen()
+        if on_screen is not None:
+            return not on_screen
+
+        fw, fh = self.frame_size
+        if fw <= 0 or fh <= 0:
+            return False  # frame unknown: never reject on a guess
+
+        s = self._OFFSCREEN_SLACK_PX
+
+        def outside(x, y):
+            return x < -s or y < -s or x >= fw + s or y >= fh + s
+
+        pts = [(action.x, action.y)]
+        if action.type == 'drag':
+            pts += [(action.press_x, action.press_y),
+                    (action.release_x, action.release_y)]
+        return any(outside(x, y) for x, y in pts)
+
+    def _pointer_on_selected_screen(self) -> Optional[bool]:
+        """Is the global pointer inside the selected screen's logical rect?
+
+        Returns None when either side of the comparison is unavailable, so the
+        caller can fall back instead of rejecting on a guess. Sampled at
+        action-completion time (~the post-frame), which is close enough to the
+        event: crossing monitors within that window is a corner case.
+        """
+        rect = self.portal_rect
+        if rect is None and self.capture_screen is not None:
+            cs = self.capture_screen
+            rect = (cs.left, cs.top, cs.width, cs.height)  # logical, like mss
+        if rect is None:
+            return None
+        pos = self._global_pointer_logical()
+        if pos is None:
+            return None
+        x, y = pos
+        rx, ry, rw, rh = rect
+        return rx <= x < rx + rw and ry <= y < ry + rh
+
+    def _global_pointer_logical(self) -> Optional[Tuple[int, int]]:
+        """The pointer in GLOBAL LOGICAL desktop coordinates, or None.
+
+        Wayland: the CUA extension's legacy GetPosition method — unlike
+        GetPositionPixel it does NOT rebase onto the current monitor, which is
+        exactly what makes it usable for telling monitors apart.
+        """
+        if SESSION_TYPE == 'wayland-gnome':
+            try:
+                out = subprocess.run(
+                    ['gdbus', 'call', '--session',
+                     '--dest', 'org.cua.CursorTracker',
+                     '--object-path', '/org/cua/CursorTracker',
+                     '--method', 'org.cua.CursorTracker.GetPosition'],
+                    capture_output=True, text=True, timeout=1.0)
+                m = re.search(r'\((-?\d+),\s*(-?\d+)\)', out.stdout)
+                if m:
+                    return (int(m.group(1)), int(m.group(2)))
+            except Exception:
+                pass
+            return None
+        if pyautogui is not None:
+            try:
+                p = pyautogui.position()
+                return (int(p[0]), int(p[1]))
+            except Exception:
+                pass
+        return None
 
     @staticmethod
     def _save_rgb_as_png(rgb_bytes: bytes, width: int, height: int, path: str):
@@ -1429,6 +1584,12 @@ class AgentAPIHandler(BaseHTTPRequestHandler):
                 "left": cs.left, "top": cs.top,
                 "width": cs.width, "height": cs.height,
             }
+            # The CAPTURE FRAME: the coordinate space screenshots are saved in
+            # and /api/action reads pixel coords in. NOT the monitor size --
+            # a scale-2 4K monitor has a 1920x1080 frame. Its presence also
+            # signals that /api/action accepts normalized norm_x/norm_y coords.
+            fw, fh = self.collector.frame_size
+            status["frame"] = {"width": int(fw), "height": int(fh)}
             self._send_json(status)
         else:
             self._send_json({"error": "Not Found"}, 404)
@@ -1455,6 +1616,7 @@ class AgentAPIHandler(BaseHTTPRequestHandler):
                     end_time=None,
                     os_name=OS_NAME, session_type=SESSION_TYPE,
                     screen_resolution=self.collector.resolution,
+                    capture_frame=self.collector.frame_size,
                 )
                 self.collector.data_store.create_task_dir(tid)
                 self.collector.seq = 0
@@ -1520,12 +1682,23 @@ class AgentAPIHandler(BaseHTTPRequestHandler):
                     self.collector.overlay.show_lock("🤖 Agent Executing Action...")
                 try:
                     monitor = self.collector.capture_screen
-                    frame_w, frame_h = self.collector.resolution
-                    # Fallback for Wayland-GNOME before first screenshot updates self.resolution
-                    if SESSION_TYPE == 'wayland-gnome' and monitor and frame_w == monitor.width and frame_h == monitor.height:
-                        # 3840x2160 is physical, PipeWire streams at 1920x1080
-                        if monitor.width == 3840 and monitor.height == 2160:
-                            frame_w, frame_h = 1920, 1080
+                    # The tracked capture frame: portal logical size at startup,
+                    # corrected from real frames as they arrive. This replaces
+                    # the old hardcoded 3840x2160 -> 1920x1080 special case.
+                    frame_w, frame_h = self.collector.frame_size
+
+                    # Normalized coordinates: norm_* fields are fractions of the
+                    # frame in [0,1], projected here onto the LIVE frame -- so a
+                    # client never needs to know the frame size, and coords stay
+                    # correct across any screen size or scale.
+                    for xk, yk, nxk, nyk in (
+                        ('x', 'y', 'norm_x', 'norm_y'),
+                        ('press_x', 'press_y', 'norm_press_x', 'norm_press_y'),
+                        ('release_x', 'release_y', 'norm_release_x', 'norm_release_y'),
+                    ):
+                        if data.get(nxk) is not None and data.get(nyk) is not None:
+                            data[xk] = int(round(float(data[nxk]) * frame_w))
+                            data[yk] = int(round(float(data[nyk]) * frame_h))
 
                     if monitor:
                         scale_x = monitor.physical_width / frame_w if frame_w > 0 else 1.0
@@ -1557,6 +1730,12 @@ class AgentAPIHandler(BaseHTTPRequestHandler):
                                 frame_height=frame_h,
                             )
                         wctrl = self.collector.wayland_ctrl
+                        # The controller caches its frame->physical scale at
+                        # build time; the tracked frame can be corrected from
+                        # real frames afterwards. Keep the scale in sync.
+                        if frame_w > 0 and frame_h > 0:
+                            wctrl.scale_x = monitor.physical_width / frame_w
+                            wctrl.scale_y = monitor.physical_height / frame_h
 
                     def input_block():
                         if not skip_overlay:

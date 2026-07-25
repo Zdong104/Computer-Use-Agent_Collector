@@ -79,7 +79,8 @@ def get_saved_screenshot(data_dir: Path, task_id: str) -> Optional[Dict[str, Any
     return ac.image_file_to_shot(afters[-1])
 
 
-def get_screenshot(data_dir: Path, task_id: str = "", monitor_index: int = 0) -> Dict[str, Any]:
+def get_screenshot(data_dir: Path, task_id: str = "", monitor_index: int = 0,
+                   frame_size=None) -> Dict[str, Any]:
     # Prefer the collector's own saved post-action frame (steps 2+); fall back to
     # a fresh Wayland portal capture for step 1 or if reading the saved frame fails.
     try:
@@ -88,13 +89,16 @@ def get_screenshot(data_dir: Path, task_id: str = "", monitor_index: int = 0) ->
         saved = None
     if saved is not None:
         return saved
-    return get_local_screenshot(monitor_index=monitor_index)
+    return get_local_screenshot(monitor_index=monitor_index, frame_size=frame_size)
 
 
-def get_local_screenshot(monitor_index: int = 0) -> Dict[str, Any]:
+def get_local_screenshot(monitor_index: int = 0, frame_size=None) -> Dict[str, Any]:
     try:
         import wayland_screenshot
-        return wayland_screenshot.capture(monitor_index=monitor_index or None)
+        # frame_size comes from the collector's status["frame"]: capture at the
+        # exact frame /api/action reads coordinates in (not a hardcoded default).
+        return wayland_screenshot.capture(monitor_index=monitor_index or None,
+                                          frame_size=frame_size)
     except Exception as e:
         raise RuntimeError(
             "Could not capture a screenshot via the Wayland portal. Ensure "
@@ -286,6 +290,13 @@ def main() -> None:
     if capture_screen:
         print(f"Collector capture screen: #{monitor_index} {capture_screen.get('name','')} "
               f"{capture_screen.get('width')}x{capture_screen.get('height')}")
+    # The frame /api/action reads coordinates in; fresh portal captures must be
+    # produced at this exact size so the model's coordinates line up.
+    live = status.get("frame") or {}
+    frame_size = ((int(live["width"]), int(live["height"]))
+                  if live.get("width") and live.get("height") else None)
+    if frame_size:
+        print(f"Collector capture frame: {frame_size[0]}x{frame_size[1]}")
 
     if not status.get("task_active"):
         start = client.start_task(args.task)
@@ -330,7 +341,8 @@ def main() -> None:
         "executing the task now with a concrete action.")
 
     for step in range(1, args.max_steps + 1):
-        screenshot = get_screenshot(data_dir, task_id=task_id, monitor_index=monitor_index)
+        screenshot = get_screenshot(data_dir, task_id=task_id, monitor_index=monitor_index,
+                                    frame_size=frame_size)
         src = "saved" if screenshot.get("source") else "portal"
 
         # Ask the model, retrying transient failures (timeouts, bad JSON) so one
